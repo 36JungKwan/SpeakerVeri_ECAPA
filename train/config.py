@@ -64,7 +64,7 @@ EARLY_STOP_PATIENCE = 10
 EARLY_STOP_DELTA = 1e-4
 
 # Learning rate scheduler
-LR_SCHEDULER = "cosine"  # "cosine" hoặc "plateau"
+LR_SCHEDULER = "plateau"  # "cosine" hoặc "plateau"
 COSINE_T_MAX = 50
 PLATEAU_PATIENCE = 5
 PLATEAU_FACTOR = 0.5
