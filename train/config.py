@@ -38,7 +38,7 @@ DIM_MAP = {
     "pitch_only": 1,
     "mfcc_only": 40
 }
-# HANDCRAFTED_DIM = DIM_MAP.get(FEATURE_MODE, 81)
+HANDCRAFTED_DIM = DIM_MAP.get(FEATURE_MODE, 81)
 
 # Kiến trúc nhánh ECAPA-TDNN
 ECAPA_CHANNELS = 512

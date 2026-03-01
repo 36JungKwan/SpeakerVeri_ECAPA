@@ -1,0 +1,20 @@
+{
+  "test_dir": "D:/test",
+  "output_dir": "./outputs",
+  "batch_size": 64,
+  "learning_rate": 0.0001,
+  "lr_scheduler": "plateau",
+  "num_epochs": 100,
+  "optimizer": "adam",
+  "weight_decay": 0.0001,
+  "mixed_precision": true,
+  "early_stop_patience": 10,
+  "seed": 42,
+  "device": "cuda",
+  "mode": 1,
+  "exp_name": "Mode1_FBank_train_raw",
+  "base_dir": "E:\\speech_data\\features\\train\\train_raw",
+  "feature_mode": "N/A",
+  "fusion_method": "N/A",
+  "duration": "train_raw"
+}
