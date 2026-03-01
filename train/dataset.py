@@ -7,6 +7,7 @@ from torch.utils.data import Dataset, DataLoader, Subset
 import random
 import os
 import glob
+from functools import partial
 from config import RANDOM_SEED, TRAIN_RATIO, FBANK_FOLDER, HANDCRAFTED_FOLDERS
 
 
@@ -83,40 +84,33 @@ class DualStreamDataset(Dataset):
         return data
 
 
-def collate_fn_dual(batch, mode):
-    """Dynamic padding cho batch dựa theo số Time-frames lớn nhất"""
+def collate_fn_dual(batch, mode, is_train=True, max_frames=300):
     labels = torch.tensor([item["label"] for item in batch], dtype=torch.long)
     output = {"label": labels}
 
-    # Gom và pad FBank
-    if mode in [1, 3]:
-        fbanks = [item["fbank"] for item in batch]
-        max_t = max([f.shape[-1] for f in fbanks])
-        
-        padded_fbanks = []
-        for f in fbanks:
-            pad_len = max_t - f.shape[-1]
-            if pad_len > 0:
-                padded_f = F.pad(f.unsqueeze(0), (0, pad_len), mode='replicate').squeeze(0)
-            else:
-                padded_f = f
-            padded_fbanks.append(padded_f)
-        output["fbank"] = torch.stack(padded_fbanks)  # (B, FBANK_DIM, T)
+    def process_features(features):
+        safe_features = [f.unsqueeze(0) if f.dim() == 1 else f for f in features]
+        processed = []
+        if is_train:
+            for f in safe_features:
+                c, t = f.shape
+                if t > max_frames:
+                    start = random.randint(0, t - max_frames)
+                    f = f[:, start:start + max_frames]
+                elif t < max_frames:
+                    f = F.pad(f.unsqueeze(0), (0, max_frames - t), mode='replicate').squeeze(0)
+                processed.append(f)
+        else:
+            max_t = min(max([f.shape[-1] for f in safe_features]), 1000)
+            for f in safe_features:
+                if f.shape[-1] > max_t: f = f[:, :max_t]
+                pad_len = max_t - f.shape[-1]
+                if pad_len > 0: f = F.pad(f.unsqueeze(0), (0, pad_len), mode='replicate').squeeze(0)
+                processed.append(f)
+        return torch.stack(processed)
 
-    # Gom và pad Handcrafted
-    if mode in [2, 3]:
-        hcs = [item["handcrafted"] for item in batch]
-        max_t = max([f.shape[-1] for f in hcs])
-        
-        padded_hcs = []
-        for f in hcs:
-            pad_len = max_t - f.shape[-1]
-            if pad_len > 0:
-                padded_f = F.pad(f.unsqueeze(0), (0, pad_len), mode='replicate').squeeze(0)
-            else:
-                padded_f = f
-            padded_hcs.append(padded_f)
-        output["handcrafted"] = torch.stack(padded_hcs)  # (B, HC_DIM, T)
+    if mode in [1,3]: output["fbank"] = process_features([item["fbank"] for item in batch])
+    if mode in [2,3]: output["handcrafted"] = process_features([item["handcrafted"] for item in batch])
 
     return output
 
@@ -137,13 +131,13 @@ def create_train_val_loaders(base_dir, mode=3, feature_mode="mfbe_pitch", batch_
     train_loader = DataLoader(
         Subset(full_dataset, indices[:train_end]),
         batch_size=batch_size, shuffle=True, num_workers=num_workers,
-        collate_fn=lambda b: collate_fn_dual(b, mode), pin_memory=True
+        collate_fn=partial(collate_fn_dual, mode=mode, is_train=True), pin_memory=True
     )
     
     val_loader = DataLoader(
         Subset(full_dataset, indices[train_end:]),
         batch_size=batch_size, shuffle=False, num_workers=num_workers,
-        collate_fn=lambda b: collate_fn_dual(b, mode), pin_memory=True
+        collate_fn=partial(collate_fn_dual, mode=mode, is_train=False), pin_memory=True
     )
     
     return train_loader, val_loader, speaker_to_idx, len(speaker_to_idx)

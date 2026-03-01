@@ -11,12 +11,11 @@ TRAIN_VAL_DIR = "path/to/data/train_val"
 TEST_DIR = "path/to/data/test"
 
 # Tên các thư mục con chứa feature (phải khớp chính xác tên thư mục trên ổ cứng)
-FBANK_FOLDER = "FBank"
+FBANK_FOLDER = "fbank_shards"
 HANDCRAFTED_FOLDERS = {
-    "mfbe_pitch": "MFBE + Pitch",
-    "mfbe_only": "Only MFBE",
-    "pitch_only": "Only Pitch",
-    "mfcc_only": "Only MFCC" # Dự phòng nếu bạn có
+    "mfbe_pitch": "mfbe_pitch_shards",
+    "mfbe_only": "mfbe_shards",
+    "pitch_only": "pitch_shards",
 }
 
 # ============================================================================
@@ -39,7 +38,7 @@ DIM_MAP = {
     "pitch_only": 1,
     "mfcc_only": 40
 }
-HANDCRAFTED_DIM = DIM_MAP.get(FEATURE_MODE, 81)
+# HANDCRAFTED_DIM = DIM_MAP.get(FEATURE_MODE, 81)
 
 # Kiến trúc nhánh ECAPA-TDNN
 ECAPA_CHANNELS = 512
@@ -55,7 +54,7 @@ EMBEDDING_DIM = 512
 # ============================================================================
 BATCH_SIZE = 64
 NUM_EPOCHS = 100
-LEARNING_RATE = 0.001
+LEARNING_RATE = 0.0001
 MIN_LEARNING_RATE = 0.00001
 WEIGHT_DECAY = 0.0001
 

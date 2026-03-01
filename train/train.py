@@ -24,7 +24,7 @@ from config import (
     PLATEAU_PATIENCE, PLATEAU_FACTOR, OPTIMIZER, MOMENTUM, NESTEROV,
     DEVICE, MIXED_PRECISION, LOG_INTERVAL, CHECKPOINT_DIR,
     BEST_MODEL_NAME, FINAL_MODEL_NAME, MODE, FUSION_METHOD, FEATURE_MODE,
-    AAM_MARGIN, AAM_SCALE, FBANK_DIM, HANDCRAFTED_DIM, EMBEDDING_DIM
+    AAM_MARGIN, AAM_SCALE, FBANK_DIM, HANDCRAFTED_DIM, EMBEDDING_DIM, DIM_MAP,
 )
 from model import get_model, AAMSoftmaxLoss
 from dataset import create_train_val_loaders
@@ -84,12 +84,15 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
         labels = batch_data["label"].to(device)
         inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
 
+        if "fbank" in inputs and torch.isnan(inputs["fbank"]).any(): continue
+        if "handcrafted" in inputs and torch.isnan(inputs["handcrafted"]).any(): continue
+
         optimizer.zero_grad()
         
         if MIXED_PRECISION:
             with autocast():
                 _, embeddings = model(**inputs)
-                loss, logits = criterion(None, labels, embeddings=embeddings)
+            loss, logits = criterion(None, labels, embeddings=embeddings.float())
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -97,7 +100,7 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
             scaler.update()
         else:
             _, embeddings = model(**inputs)
-            loss, logits = criterion(None, labels, embeddings=embeddings)
+            loss, logits = criterion(None, labels, embeddings=embeddings.float())
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -110,7 +113,7 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
         if num_batches % LOG_INTERVAL == 0:
             progress_bar.set_postfix({"loss": f"{total_loss/num_batches:.4f}", "acc": f"{total_accuracy/num_batches:.4f}"})
 
-    return total_loss / num_batches, total_accuracy / num_batches
+    return total_loss / max(1, num_batches), total_accuracy / max(1, num_batches)
 
 def validate(model, val_loader, criterion, device):
     model.eval()
@@ -123,14 +126,14 @@ def validate(model, val_loader, criterion, device):
             inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
 
             _, embeddings = model(**inputs)
-            loss, logits = criterion(None, labels, embeddings=embeddings)
+            loss, logits = criterion(None, labels, embeddings=embeddings.float())
 
             total_loss += loss.item()
             total_accuracy += compute_metrics(logits, labels)
             num_batches += 1
             progress_bar.set_postfix({"loss": f"{total_loss/num_batches:.4f}"})
 
-    return total_loss / num_batches, total_accuracy / num_batches
+    return total_loss / max(1, num_batches), total_accuracy / max(1, num_batches)
 
 # ============================================================================
 # GATING ANALYSIS
@@ -203,13 +206,14 @@ def train(args):
 
     # Model Summary
     try:
+        actual_hc_dim = DIM_MAP.get(args.feature_mode, 81)
         # Giả định một độ dài thời gian T=300 để in summary
         if args.mode == 3:
-            input_data = {"fbank": (args.batch_size, FBANK_DIM, 300), "handcrafted": (args.batch_size, HANDCRAFTED_DIM, 300)}
+            input_data = {"fbank": (args.batch_size, FBANK_DIM, 300), "handcrafted": (args.batch_size, actual_hc_dim, 300)}
         elif args.mode == 1:
             input_data = {"fbank": (args.batch_size, FBANK_DIM, 300)}
         else:
-            input_data = {"handcrafted": (args.batch_size, HANDCRAFTED_DIM, 300)}
+            input_data = {"handcrafted": (args.batch_size, actual_hc_dim, 300)}
             
         model_summary = summary(model, input_size=input_data, verbose=0, device=str(device))
         with open(os.path.join(exp_dir, "model_summary.txt"), "w") as f:

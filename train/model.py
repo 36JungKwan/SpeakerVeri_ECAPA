@@ -15,7 +15,7 @@ from config import (
     FBANK_DIM, HANDCRAFTED_DIM,
     ECAPA_CHANNELS, ECAPA_BLOCKS, ECAPA_KERNEL_SIZE, ECAPA_DILATION,
     EMBEDDING_DIM, AAM_MARGIN, AAM_SCALE,
-    MODE, FUSION_METHOD
+    MODE, FUSION_METHOD, DIM_MAP
 )
 
 # ============================================================================
@@ -69,13 +69,13 @@ class ECAPATDNN(nn.Module):
         x = self.conv1d_last(x)
 
         # Attentive / Statistical Pooling
-        mean = x.mean(dim=-1)
-        std = x.std(dim=-1)
-        x = torch.cat([mean, std], dim=1)  # (B, channels*4)
+        x_f32 = x.float()
+        mean = x_f32.mean(dim=-1)
+        std = x_f32.std(dim=-1)
+        pooled = torch.cat([mean, std], dim=1).type_as(x)  # (B, channels*4)
 
         # Xuất vector (Late Fusion level)
-        x = self.bn_fc(self.fc1(x))
-        return x
+        return self.bn_fc(self.fc1(pooled))
 
 
 # ============================================================================
@@ -104,16 +104,15 @@ class HandcraftedEncoder(nn.Module):
         self.bn = nn.BatchNorm1d(embedding_dim)
 
     def forward(self, x):
-        """x: (Batch, HC_Dim, Time) -> Output: (Batch, Embedding_Dim)"""
         x = self.conv_blocks(x)
         
-        # Pooling tương tự nhánh chính
-        mean = x.mean(dim=-1)
-        std = x.std(dim=-1)
-        x = torch.cat([mean, std], dim=1)
+        # BẢO VỆ TRÀN SỐ
+        x_f32 = x.float()
+        mean = x_f32.mean(dim=-1)
+        std = x_f32.std(dim=-1)
+        pooled = torch.cat([mean, std], dim=1).type_as(x)
         
-        x = self.bn(self.fc(x))
-        return x
+        return self.bn(self.fc(pooled))
 
 
 # ============================================================================
@@ -172,10 +171,11 @@ class CrossAttentionFusion(nn.Module):
 # COMPLETE MODEL (Wrapper)
 # ============================================================================
 class SpeakerVerificationModel(nn.Module):
-    def __init__(self, num_speakers, mode=MODE, fusion_method=FUSION_METHOD):
+    def __init__(self, num_speakers, mode=MODE, fusion_method=FUSION_METHOD, feature_mode="mfbe_pitch"):
         super().__init__()
         self.mode = mode
         self.fusion_method = fusion_method
+        actual_hc_dim = DIM_MAP.get(feature_mode, 81)
 
         # Mode 1: Chỉ chạy ECAPA-TDNN trên FBank
         if mode in [1, 3]:
@@ -183,7 +183,7 @@ class SpeakerVerificationModel(nn.Module):
 
         # Mode 2: Chỉ chạy Conv1D trên Handcrafted
         if mode in [2, 3]:
-            self.aux_encoder = HandcraftedEncoder(input_dim=HANDCRAFTED_DIM, embedding_dim=EMBEDDING_DIM)
+            self.aux_encoder = HandcraftedEncoder(input_dim=actual_hc_dim, embedding_dim=EMBEDDING_DIM)
 
         # Mode 3: Gọi thêm hàm Fusion
         if mode == 3:
@@ -243,7 +243,7 @@ class AAMSoftmaxLoss(nn.Module):
 
     def forward(self, logits, labels, embeddings=None):
         cosine = F.linear(F.normalize(embeddings), F.normalize(self.weight))
-        sine = torch.sqrt((1.0 - torch.pow(cosine, 2)).clamp(0, 1))
+        sine = torch.sqrt((1.0 - torch.pow(cosine, 2)).clamp(1e-7, 1.0))
         phi = cosine * self.cos_m - sine * self.sin_m
         phi = torch.where(cosine > self.th, phi, cosine - self.mm)
         
