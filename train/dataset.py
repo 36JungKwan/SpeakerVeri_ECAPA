@@ -13,24 +13,26 @@ from config import RANDOM_SEED, TRAIN_RATIO, FBANK_FOLDER, HANDCRAFTED_FOLDERS
 import copy
 
 def load_shard_data(folder_path):
-    """Tải Shards với cơ chế nén Float16 để tiết kiệm 50% RAM"""
-    print(f"  -> Tối ưu RAM: Đang nạp data từ {os.path.basename(folder_path)}...")
+    print(f"  -> Tối ưu RAM: Nạp thẳng data vào RAM (Float16) từ {os.path.basename(folder_path)}...")
     shard_files = sorted(glob.glob(os.path.join(folder_path, "**", "*.pt"), recursive=True))
     if not shard_files:
         raise ValueError(f"Không tìm thấy file .pt nào trong {folder_path}")
         
     shards_data = []
     all_speaker_ids = []
-    sample_map = [] # Lưu vị trí: idx -> (shard_idx, vị trí_trong_shard)
+    sample_map = [] 
+    
+    # 1. TẮT BỘ GOM RÁC ĐỂ TRÁNH LỖI TREO MÁY 25 PHÚT
+    gc.disable() 
     
     for shard_idx, f in enumerate(shard_files):
-        # Tắt cảnh báo weights_only của PyTorch
+        # 2. KHÔNG DÙNG mmap, nạp thẳng vào RAM
         data = torch.load(f, map_location='cpu', weights_only=False)
         
         feat_key = [k for k in data.keys() if k not in ["speaker_ids", "filenames", "model_name"]][0]
         features = data[feat_key]
         
-        # Ép kiểu toàn bộ về Float16 (Giảm một nửa dung lượng RAM)
+        # 3. ÉP KIỂU SANG FLOAT16 NGAY LẬP TỨC ĐỂ CỨU 32GB RAM
         if isinstance(features, torch.Tensor):
             shards_data.append(features.half())
         else:
@@ -39,15 +41,16 @@ def load_shard_data(folder_path):
         spks = data["speaker_ids"]
         all_speaker_ids.extend(spks)
         
-        # Lưu lại bản đồ tìm kiếm thay vì xé lẻ tensor
         for i in range(len(spks)):
             sample_map.append((shard_idx, i))
             
-        # Kích hoạt dọn rác ngay lập tức
+        # 4. Xóa biến tạm thủ công để RAM không bị phình to (Peak Memory) trong lúc load
         del data
         del features
-        gc.collect()
         
+    # 5. BẬT LẠI BỘ GOM RÁC SAU KHI LOAD XONG
+    gc.enable() 
+    
     return shards_data, all_speaker_ids, sample_map
 
 class DualStreamDataset(Dataset):
@@ -112,15 +115,17 @@ def collate_fn_dual(batch, mode, is_train=True, max_frames=300):
                     start = random.randint(0, t - max_frames)
                     f = f[:, start:start + max_frames]
                 elif t < max_frames:
-                    f = F.pad(f.unsqueeze(0), (0, max_frames - t), mode='replicate').squeeze(0)
+                    f = F.pad(f.unsqueeze(0), (0, max_frames - t), mode='constant', value=0).squeeze(0)
                 processed.append(f)
         else:
             max_t = min(max([f.shape[-1] for f in safe_features]), 1000)
             for f in safe_features:
                 if f.shape[-1] > max_t: f = f[:, :max_t]
                 pad_len = max_t - f.shape[-1]
-                if pad_len > 0: f = F.pad(f.unsqueeze(0), (0, pad_len), mode='replicate').squeeze(0)
+                if pad_len > 0: 
+                    f = F.pad(f.unsqueeze(0), (0, pad_len), mode='constant', value=0).squeeze(0)
                 processed.append(f)
+
         return torch.stack(processed)
 
     if mode in [1,3]: output["fbank"] = process_features([item["fbank"] for item in batch])

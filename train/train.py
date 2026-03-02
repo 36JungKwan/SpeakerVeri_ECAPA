@@ -271,7 +271,7 @@ def train(args):
         writer.add_scalar("Metrics/Val_OpenSet_EER", v_eer, epoch)
         writer.add_scalar("Metrics/Val_OpenSet_MinDCF", v_mindcf, epoch)
         
-        print(f"Epoch {epoch+1:3d} | Train Loss: {t_loss:.4f}, Acc: {t_acc:.4f} | Val EER: {v_eer:.2f}% | MinDCF: {v_mindcf:.4f} | LR: {opt.param_groups['lr']:.6f}")
+        print(f"Epoch {epoch+1:3d} | Train Loss: {t_loss:.4f}, Acc: {t_acc:.4f} | Val EER: {v_eer:.2f}% | MinDCF: {v_mindcf:.4f} | LR: {opt.param_groups[0]['lr']:.6f}")
 
         # 5. LƯU BEST MODEL THEO EER & MinDCF
         if v_eer < best_val_eer:
@@ -287,7 +287,7 @@ def train(args):
             break
 
     # Final Tasks
-    model, _, _, _ = load_checkpoint(os.path.join(exp_dir, BEST_MODEL_NAME), model)
+    model, _, _, _ = load_checkpoint(os.path.join(exp_dir, "best_eer_model.pth"), model)
     
     # Gating Analysis
     gates, _ = analyze_gating_behavior(model, val_loader, device, exp_dir)

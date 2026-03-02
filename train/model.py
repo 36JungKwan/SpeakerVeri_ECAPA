@@ -46,21 +46,23 @@ class ECAPATDNN(nn.Module):
     """ECAPA-TDNN xử lý độ dài chuỗi (T) và trả về vector Embedding 1D"""
     def __init__(self, input_dim=FBANK_DIM, channels=ECAPA_CHANNELS, blocks=ECAPA_BLOCKS, kernel_size=ECAPA_KERNEL_SIZE, embedding_dim=EMBEDDING_DIM):
         super().__init__()
+        self.inst_norm = nn.InstanceNorm1d(input_dim) 
+        
         self.conv1d_1 = nn.Conv1d(input_dim, channels, kernel_size=5, padding=2)
         self.bn_1 = nn.BatchNorm1d(channels)
 
         self.blocks = nn.ModuleList([
             BottleneckBlock(channels, kernel_size, dilation=d)
-            for d in [1, 2, 3, 4][:blocks] # Tăng dần dilation
+            for d in [1, 2, 3, 4][:blocks]
         ])
 
         self.conv1d_last = nn.Conv1d(channels, channels * 2, kernel_size=1)
-        # Sinh ra vector 1D bằng FC layer cuối cùng
-        self.fc1 = nn.Linear(channels * 4, embedding_dim)  # *4 vì nối mean+std
+        self.fc1 = nn.Linear(channels * 4, embedding_dim)
         self.bn_fc = nn.BatchNorm1d(embedding_dim)
 
     def forward(self, x):
         """x: (Batch, FBank_Dim, Time) -> Output: (Batch, Embedding_Dim)"""
+        x = self.inst_norm(x)
         x = self.bn_1(self.conv1d_1(x))
         
         for block in self.blocks:
@@ -148,22 +150,39 @@ class GatingFusion(nn.Module):
 
 
 class CrossAttentionFusion(nn.Module):
-    def __init__(self, dim=EMBEDDING_DIM, num_heads=8):
+    """
+    Vector-level Cross Attention. 
+    Dùng FBank làm Query để soi chiếu và trích xuất thông tin bổ sung từ Handcrafted (Key/Value).
+    """
+    def __init__(self, dim=EMBEDDING_DIM):
         super().__init__()
-        # Lấy FBank làm Query, Handcrafted làm Key/Value
-        self.mha = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, batch_first=True)
+        # Tạo các lớp chiếu (Projection) độc lập cho Q, K, V
+        self.W_q = nn.Linear(dim, dim)
+        self.W_k = nn.Linear(dim, dim)
+        self.W_v = nn.Linear(dim, dim)
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, emb_fbank, emb_hc):
-        # Biến vector (B, D) thành sequence length 1: (B, 1, D)
-        q = emb_fbank.unsqueeze(1)
-        k = emb_hc.unsqueeze(1)
-        v = emb_hc.unsqueeze(1)
-
-        attn_out, _ = self.mha(query=q, key=k, value=v)
+        # 1. emb_fbank đóng vai trò Query (Người soi chiếu)
+        q = self.W_q(emb_fbank)  # (Batch, 512)
         
-        # Residual Connection (Giữ lại gốc FBank cộng thêm thông tin chú ý từ Pitch)
-        out = self.norm(emb_fbank + attn_out.squeeze(1))
+        # 2. emb_hc đóng vai trò Key và Value (Nguồn thông tin bổ sung)
+        k = self.W_k(emb_hc)     # (Batch, 512)
+        v = self.W_v(emb_hc)     # (Batch, 512)
+        
+        # 3. Tính điểm tương quan (Attention Score) giữa FBank và Handcrafted
+        # Phép nhân vô hướng (Dot product) tạo ra độ lớn tương quan, sau đó chia scale
+        scores = torch.sum(q * k, dim=-1, keepdim=True) / math.sqrt(q.size(-1)) # (Batch, 1)
+        
+        # 4. Tính Attention Weight
+        # Dùng Sigmoid thay cho Softmax vì ta chỉ có 1 phần tử (quyết định "lấy nhiều" hay "lấy ít")
+        attn_weights = torch.sigmoid(scores) # (Batch, 1)
+        
+        # 5. Trích xuất Value dựa trên trọng số Attention
+        attn_out = attn_weights * v # (Batch, 512)
+        
+        # 6. Residual Connection: Giữ lại nền tảng FBank, cộng thêm phần thông tin chú ý từ Pitch/MFBE
+        out = self.norm(emb_fbank + attn_out)
         return out
 
 

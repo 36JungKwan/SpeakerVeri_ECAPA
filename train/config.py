@@ -36,7 +36,6 @@ DIM_MAP = {
     "mfbe_pitch": 81,  # 80 MFBE + 1 Pitch
     "mfbe_only": 80,
     "pitch_only": 1,
-    "mfcc_only": 40
 }
 HANDCRAFTED_DIM = DIM_MAP.get(FEATURE_MODE, 81)
 
@@ -55,7 +54,7 @@ EMBEDDING_DIM = 512
 BATCH_SIZE = 64
 NUM_EPOCHS = 100
 LEARNING_RATE = 0.0001
-MIN_LEARNING_RATE = 0.00001
+MIN_LEARNING_RATE = 0.0000001
 WEIGHT_DECAY = 0.0001
 
 # Early stopping
@@ -65,7 +64,7 @@ EARLY_STOP_DELTA = 1e-4
 # Learning rate scheduler
 LR_SCHEDULER = "plateau"  # "cosine" hoặc "plateau"
 COSINE_T_MAX = 50
-PLATEAU_PATIENCE = 5
+PLATEAU_PATIENCE = 3
 PLATEAU_FACTOR = 0.5
 
 # ============================================================================

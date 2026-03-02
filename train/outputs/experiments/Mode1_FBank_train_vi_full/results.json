@@ -1,4 +1,28 @@
 {
-  "best_val_loss": 5.939514602268145,
-  "epochs": 21
+    "status": "completed",
+    "epochs_trained": 13,
+    "config": {
+        "test_dir": "D:/test",
+        "output_dir": "./outputs",
+        "batch_size": 64,
+        "learning_rate": 0.0001,
+        "lr_scheduler": "plateau",
+        "num_epochs": 50,
+        "optimizer": "adam",
+        "weight_decay": 0.001,
+        "mixed_precision": true,
+        "early_stop_patience": 5,
+        "seed": 42,
+        "device": "cuda",
+        "mode": 1,
+        "exp_name": "Mode1_FBank_train_vi_full",
+        "base_dir": "E:\\speech_data\\features\\train\\train_vi_full",
+        "feature_mode": "N/A",
+        "fusion_method": "N/A",
+        "duration": "train_vi_full"
+    },
+    "best_metrics": {
+        "best_val_eer": 12.450000000000006,
+        "best_val_mindcf": 0.024335000000000002
+    }
 }
