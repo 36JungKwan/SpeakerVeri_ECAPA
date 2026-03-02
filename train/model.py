@@ -260,8 +260,9 @@ class AAMSoftmaxLoss(nn.Module):
 # ============================================================================
 # UTILITIES
 # ============================================================================
-def get_model(num_speakers, device="cuda", mode=MODE, fusion_method=FUSION_METHOD):
-    model = SpeakerVerificationModel(num_speakers, mode=mode, fusion_method=fusion_method)
+def get_model(num_speakers, device="cuda", mode=MODE, fusion_method=FUSION_METHOD, feature_mode="mfbe_pitch"):
+    # Truyền thêm feature_mode vào class
+    model = SpeakerVerificationModel(num_speakers, mode=mode, fusion_method=fusion_method, feature_mode=feature_mode)
     model = model.to(device)
 
     print(f"\n{'='*70}")
@@ -269,6 +270,9 @@ def get_model(num_speakers, device="cuda", mode=MODE, fusion_method=FUSION_METHO
     print(f"  Mode: {mode} (1=Main, 2=Handcrafted, 3=Fusion)")
     if mode == 3:
         print(f"  Fusion method (Late Fusion): {fusion_method.upper()}")
+    # Thêm dòng log này để dễ theo dõi feature đang dùng
+    if mode in [2,3]:
+        print(f"  Handcrafted Feature: {feature_mode.upper()}")
     print(f"  Num speakers: {num_speakers}")
     print(f"  Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
     print(f"{'='*70}\n")

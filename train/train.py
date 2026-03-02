@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
 from torch.utils.tensorboard import SummaryWriter
+from inference import evaluate_speaker_verification
 
 from config import (
     BATCH_SIZE, NUM_EPOCHS, LEARNING_RATE, MIN_LEARNING_RATE, WEIGHT_DECAY,
@@ -58,19 +59,19 @@ class EarlyStopping:
         self.patience = patience
         self.delta = delta
         self.counter = 0
-        self.best_loss = None
+        self.best_score = None # Đổi best_loss thành best_score
         self.early_stop = False
 
-    def __call__(self, val_loss):
-        if self.best_loss is None:
-            self.best_loss = val_loss
-        elif val_loss < self.best_loss - self.delta:
-            self.best_loss = val_loss
-            self.counter = 0
-        else:
+    def __call__(self, val_eer): # Truyền val_eer vào
+        if self.best_score is None:
+            self.best_score = val_eer
+        elif val_eer > self.best_score - self.delta: # EER không giảm
             self.counter += 1
             if self.counter >= self.patience:
                 self.early_stop = True
+        else:
+            self.best_score = val_eer
+            self.counter = 0
 
 # ============================================================================
 # TRAINING & VALIDATION LOOPS
@@ -202,7 +203,7 @@ def train(args):
     )
 
     # Model
-    model = get_model(num_speakers, device=str(device), mode=args.mode, fusion_method=args.fusion_method)
+    model = get_model(num_speakers, device=str(device), mode=args.mode, fusion_method=args.fusion_method, feature_mode=args.feature_mode)
 
     # Model Summary
     try:
@@ -234,32 +235,55 @@ def train(args):
     scaler = GradScaler() if args.mixed_precision else None
     early_stopping = EarlyStopping(patience=args.early_stop_patience)
 
-    best_val_loss = float("inf")
-    history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
+    best_val_eer = float("inf")
+    best_val_mindcf = float("inf")
+    history = {"train_loss": [], "train_acc": [], "val_eer": [], "val_mindcf": []}
 
-    print("Starting training...\n")
+    print("Starting training (Open-set Validation)...\n")
     for epoch in range(args.num_epochs):
+        # 1. Train 1 epoch
         t_loss, t_acc = train_epoch(model, train_loader, opt, criterion, scaler, epoch, device)
-        v_loss, v_acc = validate(model, val_loader, criterion, device)
-
+        
+        # 2. VALIDATION ĐỘC LẬP BẰNG EER & MinDCF (KHÔNG DÙNG LOSS NỮA)
+        print(f"  -> Đang tính toán EER (Open-set) cho Epoch {epoch+1}...")
+        val_metrics = evaluate_speaker_verification(
+            model=model, 
+            data_loader=val_loader, 
+            device=device,
+            num_pairs=20000, 
+            p_target=0.05
+        )
+        v_eer = val_metrics["EER (%)"]
+        v_mindcf = val_metrics[f"MinDCF (p=0.05)"]
+        
+        # 3. SCHEDULER & EARLY STOPPING LÚC NÀY BUỘC PHẢI DÙNG EER
         if args.lr_scheduler == "cosine": scheduler.step()
-        else: scheduler.step(v_loss)
+        else: scheduler.step(v_eer) 
 
+        early_stopping(v_eer) # Theo dõi EER
+
+        # 4. LƯU HISTORY & TENSORBOARD
         history["train_loss"].append(t_loss); history["train_acc"].append(t_acc)
-        history["val_loss"].append(v_loss); history["val_acc"].append(v_acc)
+        history["val_eer"].append(v_eer); history["val_mindcf"].append(v_mindcf)
 
-        writer.add_scalar("Loss/Train", t_loss, epoch); writer.add_scalar("Loss/Validation", v_loss, epoch)
-        writer.add_scalar("Accuracy/Train", t_acc, epoch); writer.add_scalar("Accuracy/Validation", v_acc, epoch)
+        writer.add_scalar("Loss/Train", t_loss, epoch)
+        writer.add_scalar("Accuracy/Train", t_acc, epoch)
+        writer.add_scalar("Metrics/Val_OpenSet_EER", v_eer, epoch)
+        writer.add_scalar("Metrics/Val_OpenSet_MinDCF", v_mindcf, epoch)
+        
+        print(f"Epoch {epoch+1:3d} | Train Loss: {t_loss:.4f}, Acc: {t_acc:.4f} | Val EER: {v_eer:.2f}% | MinDCF: {v_mindcf:.4f} | LR: {opt.param_groups['lr']:.6f}")
 
-        print(f"Epoch {epoch+1:3d} | Train Loss: {t_loss:.4f}, Acc: {t_acc:.4f} | Val Loss: {v_loss:.4f}, Acc: {v_acc:.4f} | LR: {opt.param_groups[0]['lr']:.6f}")
+        # 5. LƯU BEST MODEL THEO EER & MinDCF
+        if v_eer < best_val_eer:
+            best_val_eer = v_eer
+            save_checkpoint(model, opt, epoch, best_val_eer, os.path.join(exp_dir, "best_eer_model.pth"))
+            
+        if v_mindcf < best_val_mindcf:
+            best_val_mindcf = v_mindcf
+            save_checkpoint(model, opt, epoch, best_val_mindcf, os.path.join(exp_dir, "best_mindcf_model.pth"))
 
-        if v_loss < best_val_loss:
-            best_val_loss = v_loss
-            save_checkpoint(model, opt, epoch, best_val_loss, os.path.join(exp_dir, BEST_MODEL_NAME))
-
-        early_stopping(v_loss)
         if early_stopping.early_stop:
-            print("\n✓ Early stopping triggered!")
+            print("\n✓ Early stopping triggered do EER không giảm nữa!")
             break
 
     # Final Tasks
@@ -268,8 +292,22 @@ def train(args):
     # Gating Analysis
     gates, _ = analyze_gating_behavior(model, val_loader, device, exp_dir)
 
+    final_results = {
+        "status": "completed",
+        "epochs_trained": epoch + 1,
+        "config": vars(args),  # Lưu toàn bộ tham số (batch_size, lr, mode, feature...)
+        "best_metrics": {
+            "best_val_eer": best_val_eer,
+            "best_val_mindcf": best_val_mindcf
+        }
+    }
+    history_path = os.path.join(exp_dir, "training_history.json")
+    with open(history_path, "w") as f:
+        json.dump(history, f, indent=4)
+
+    # Ghi đè vào file results.json
     with open(os.path.join(exp_dir, "results.json"), "w") as f:
-        json.dump({"best_val_loss": best_val_loss, "epochs": epoch+1}, f, indent=2)
+        json.dump(final_results, f, indent=4) # Chỉnh indent=4 cho file JSON dễ đọc hơn
 
     writer.close()
     return model, history, exp_dir

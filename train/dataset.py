@@ -10,6 +10,7 @@ import glob
 import gc
 from functools import partial
 from config import RANDOM_SEED, TRAIN_RATIO, FBANK_FOLDER, HANDCRAFTED_FOLDERS
+import copy
 
 def load_shard_data(folder_path):
     """Tải Shards với cơ chế nén Float16 để tiết kiệm 50% RAM"""
@@ -130,23 +131,44 @@ def collate_fn_dual(batch, mode, is_train=True, max_frames=300):
 def create_train_val_loaders(base_dir, mode=3, feature_mode="mfbe_pitch", batch_size=64, num_workers=0):
     print(f"🔍 Đang quét dữ liệu Train/Val tại: {base_dir}...")
     full_dataset = DualStreamDataset(base_dir, mode, feature_mode)
-    num_samples = len(full_dataset)
-    speaker_to_idx = full_dataset.speaker_to_idx
     
-    indices = list(range(num_samples))
+    # 1. LẤY DANH SÁCH SPEAKER VÀ TRỘN NGẪU NHIÊN
+    unique_speakers = sorted(set(full_dataset.speaker_ids))
     random.seed(RANDOM_SEED)
-    random.shuffle(indices)
+    random.shuffle(unique_speakers)
 
-    train_end = int(num_samples * TRAIN_RATIO)
+    # 2. CHIA TẬP DATA THEO SPEAKER ID (Open-set)
+    num_spks = len(unique_speakers)
+    train_spk_end = int(num_spks * TRAIN_RATIO)
     
+    train_spks = set(unique_speakers[:train_spk_end])
+    val_spks = set(unique_speakers[train_spk_end:])
+
+    # 3. LỌC INDEX TƯƠNG ỨNG
+    train_indices = [i for i, spk in enumerate(full_dataset.speaker_ids) if spk in train_spks]
+    val_indices = [i for i, spk in enumerate(full_dataset.speaker_ids) if spk in val_spks]
+
+    # 4. TẠO MAPPING NHÃN (LABEL 0 -> N) ĐỘC LẬP
+    train_speaker_to_idx = {spk: idx for idx, spk in enumerate(sorted(train_spks))}
+    val_speaker_to_idx = {spk: idx for idx, spk in enumerate(sorted(val_spks))}
+
+    # 5. TẠO 2 DATASET ĐỘC LẬP ĐỂ KHÔNG ĐỤNG CHẠM LABEL
+    train_dataset = copy.copy(full_dataset)
+    train_dataset.speaker_to_idx = train_speaker_to_idx
+    
+    val_dataset = copy.copy(full_dataset)
+    val_dataset.speaker_to_idx = val_speaker_to_idx
+
+    # 6. TẠO DATALOADER
     train_loader = DataLoader(
-        Subset(full_dataset, indices[:train_end]), batch_size=batch_size, shuffle=True, num_workers=num_workers,
+        Subset(train_dataset, train_indices), batch_size=batch_size, shuffle=True, num_workers=num_workers,
         collate_fn=partial(collate_fn_dual, mode=mode, is_train=True), pin_memory=True
     )
     
     val_loader = DataLoader(
-        Subset(full_dataset, indices[train_end:]), batch_size=batch_size, shuffle=False, num_workers=num_workers,
+        Subset(val_dataset, val_indices), batch_size=batch_size, shuffle=False, num_workers=num_workers,
         collate_fn=partial(collate_fn_dual, mode=mode, is_train=False), pin_memory=True
     )
     
-    return train_loader, val_loader, speaker_to_idx, len(speaker_to_idx)
+    # Trả về số lượng speaker của tập Train (AAM-Softmax chỉ cần biết con số này)
+    return train_loader, val_loader, train_speaker_to_idx, len(train_spks)

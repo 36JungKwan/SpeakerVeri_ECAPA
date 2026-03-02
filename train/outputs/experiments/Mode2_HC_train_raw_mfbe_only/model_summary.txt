@@ -4,7 +4,7 @@ Layer (type:depth-idx)                   Param #
 SpeakerVerificationModel                 --
 ├─HandcraftedEncoder: 1-1                --
 │    └─Sequential: 2-1                   --
-│    │    └─Conv1d: 3-1                  31,232
+│    │    └─Conv1d: 3-1                  30,848
 │    │    └─BatchNorm1d: 3-2             256
 │    │    └─ReLU: 3-3                    --
 │    │    └─Conv1d: 3-4                  98,560
@@ -16,7 +16,7 @@ SpeakerVerificationModel                 --
 │    └─Linear: 2-2                       524,800
 │    └─BatchNorm1d: 2-3                  1,024
 =================================================================
-Total params: 1,051,136
-Trainable params: 1,051,136
+Total params: 1,050,752
+Trainable params: 1,050,752
 Non-trainable params: 0
 =================================================================
