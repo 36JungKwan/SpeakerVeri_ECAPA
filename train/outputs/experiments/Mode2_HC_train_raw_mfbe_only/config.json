@@ -11,10 +11,10 @@
   "early_stop_patience": 10,
   "seed": 42,
   "device": "cuda",
-  "mode": 1,
-  "exp_name": "Mode1_FBank_train_raw",
+  "mode": 2,
+  "exp_name": "Mode2_HC_train_raw_mfbe_only",
   "base_dir": "E:\\speech_data\\features\\train\\train_raw",
-  "feature_mode": "N/A",
+  "feature_mode": "mfbe_only",
   "fusion_method": "N/A",
   "duration": "train_raw"
 }

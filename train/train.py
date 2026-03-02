@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import numpy as np
 import os
 import json
@@ -90,7 +90,7 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
         optimizer.zero_grad()
         
         if MIXED_PRECISION:
-            with autocast():
+            with autocast('cuda'):
                 _, embeddings = model(**inputs)
             loss, logits = criterion(None, labels, embeddings=embeddings.float())
             scaler.scale(loss).backward()
@@ -110,7 +110,7 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
         total_accuracy += accuracy
         num_batches += 1
 
-        if num_batches % LOG_INTERVAL == 0:
+        if num_batches % 10 == 0:
             progress_bar.set_postfix({"loss": f"{total_loss/num_batches:.4f}", "acc": f"{total_accuracy/num_batches:.4f}"})
 
     return total_loss / max(1, num_batches), total_accuracy / max(1, num_batches)
@@ -207,15 +207,15 @@ def train(args):
     # Model Summary
     try:
         actual_hc_dim = DIM_MAP.get(args.feature_mode, 81)
-        # Giả định một độ dài thời gian T=300 để in summary
-        if args.mode == 3:
-            input_data = {"fbank": (args.batch_size, FBANK_DIM, 300), "handcrafted": (args.batch_size, actual_hc_dim, 300)}
-        elif args.mode == 1:
-            input_data = {"fbank": (args.batch_size, FBANK_DIM, 300)}
-        else:
-            input_data = {"handcrafted": (args.batch_size, actual_hc_dim, 300)}
+        dummy_kwargs = {}
+        if args.mode in [1,3]: 
+            dummy_kwargs["fbank"] = torch.randn(args.batch_size, FBANK_DIM, 300).to(device)
+        if args.mode in [2,3]: 
+            dummy_kwargs["handcrafted"] = torch.randn(args.batch_size, actual_hc_dim, 300).to(device)
             
-        model_summary = summary(model, input_size=input_data, verbose=0, device=str(device))
+        # Dùng **dummy_kwargs thay vì input_size
+        model_summary = summary(model, **dummy_kwargs, verbose=0)
+        
         with open(os.path.join(exp_dir, "model_summary.txt"), "w") as f:
             f.write(str(model_summary))
     except Exception as e:

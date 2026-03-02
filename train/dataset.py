@@ -1,5 +1,5 @@
 """
-Dataset loader for Dual-stream Speaker Verification (FBank & Handcrafted)
+Dataset loader for Dual-stream Speaker Verification (Optimized for 32GB RAM)
 """
 import torch
 import torch.nn.functional as F
@@ -7,34 +7,47 @@ from torch.utils.data import Dataset, DataLoader, Subset
 import random
 import os
 import glob
+import gc
 from functools import partial
 from config import RANDOM_SEED, TRAIN_RATIO, FBANK_FOLDER, HANDCRAFTED_FOLDERS
 
 def load_shard_data(folder_path):
-    """Hàm tải toàn bộ các file .pt (shards) trong thư mục vào RAM một lần duy nhất"""
+    """Tải Shards với cơ chế nén Float16 để tiết kiệm 50% RAM"""
+    print(f"  -> Tối ưu RAM: Đang nạp data từ {os.path.basename(folder_path)}...")
     shard_files = sorted(glob.glob(os.path.join(folder_path, "**", "*.pt"), recursive=True))
     if not shard_files:
         raise ValueError(f"Không tìm thấy file .pt nào trong {folder_path}")
         
-    all_features = []
+    shards_data = []
     all_speaker_ids = []
+    sample_map = [] # Lưu vị trí: idx -> (shard_idx, vị trí_trong_shard)
     
-    for f in shard_files:
-        data = torch.load(f, map_location='cpu')
+    for shard_idx, f in enumerate(shard_files):
+        # Tắt cảnh báo weights_only của PyTorch
+        data = torch.load(f, map_location='cpu', weights_only=False)
         
-        # Tự động tìm key chứa dữ liệu tensor (loại trừ các key text như id, filename)
         feat_key = [k for k in data.keys() if k not in ["speaker_ids", "filenames", "model_name"]][0]
         features = data[feat_key]
         
-        # Rã Tensor Batch lớn ra thành list các Tensor nhỏ
+        # Ép kiểu toàn bộ về Float16 (Giảm một nửa dung lượng RAM)
         if isinstance(features, torch.Tensor):
-            all_features.extend([features[i] for i in range(features.size(0))])
+            shards_data.append(features.half())
         else:
-            all_features.extend(features)
+            shards_data.append([t.half() for t in features])
             
-        all_speaker_ids.extend(data["speaker_ids"])
+        spks = data["speaker_ids"]
+        all_speaker_ids.extend(spks)
         
-    return all_features, all_speaker_ids
+        # Lưu lại bản đồ tìm kiếm thay vì xé lẻ tensor
+        for i in range(len(spks)):
+            sample_map.append((shard_idx, i))
+            
+        # Kích hoạt dọn rác ngay lập tức
+        del data
+        del features
+        gc.collect()
+        
+    return shards_data, all_speaker_ids, sample_map
 
 class DualStreamDataset(Dataset):
     def __init__(self, base_dir, mode=3, feature_mode="mfbe_pitch", speaker_to_idx=None):
@@ -44,23 +57,16 @@ class DualStreamDataset(Dataset):
         fbank_dir = os.path.join(base_dir, FBANK_FOLDER)
         hc_dir = os.path.join(base_dir, self.hc_folder_name)
         
-        self.fbanks = []
-        self.hcs = []
         self.speaker_ids = []
         
-        # 1. Load FBank (Cho nhánh ECAPA-TDNN)
         if mode in [1,3]:
-            print(f"Loading FBank shards từ {fbank_dir}...")
-            self.fbanks, self.speaker_ids = load_shard_data(fbank_dir)
+            self.fbank_shards, self.speaker_ids, self.fbank_map = load_shard_data(fbank_dir)
             
-        # 2. Load Handcrafted Feature (MFBE, Pitch...)
         if mode in [2,3]:
-            print(f"Loading Handcrafted shards từ {hc_dir}...")
-            self.hcs, hc_speaker_ids = load_shard_data(hc_dir)
+            self.hc_shards, hc_speaker_ids, self.hc_map = load_shard_data(hc_dir)
             if mode == 2:
                 self.speaker_ids = hc_speaker_ids
                 
-        # 3. Tạo mapping cho Labels
         self.speaker_to_idx = speaker_to_idx or {}
         if not self.speaker_to_idx:
             unique_speakers = sorted(set(self.speaker_ids))
@@ -74,21 +80,22 @@ class DualStreamDataset(Dataset):
     def __getitem__(self, idx):
         spk_id = self.speaker_ids[idx]
         label = self.speaker_to_idx[spk_id]
-        
         data = {"label": label}
         
         if self.mode in [1,3]:
-            fbank_feat = self.fbanks[idx].float()
+            shard_idx, local_idx = self.fbank_map[idx]
+            # Lấy data ra và bung ngược lại thành Float32 cho GPU
+            fbank_feat = self.fbank_shards[shard_idx][local_idx].float()
             if fbank_feat.dim() == 1: fbank_feat = fbank_feat.unsqueeze(0)
             data["fbank"] = fbank_feat
             
         if self.mode in [2,3]:
-            hc_feat = self.hcs[idx].float()
+            shard_idx, local_idx = self.hc_map[idx]
+            hc_feat = self.hc_shards[shard_idx][local_idx].float()
             if hc_feat.dim() == 1: hc_feat = hc_feat.unsqueeze(0)
             data["handcrafted"] = hc_feat
             
         return data
-
 
 def collate_fn_dual(batch, mode, is_train=True, max_frames=300):
     labels = torch.tensor([item["label"] for item in batch], dtype=torch.long)

@@ -12,9 +12,9 @@
   "seed": 42,
   "device": "cuda",
   "mode": 1,
-  "exp_name": "Mode1_FBank_train_raw",
-  "base_dir": "E:\\speech_data\\features\\train\\train_raw",
+  "exp_name": "Mode1_FBank_train_vi_full",
+  "base_dir": "E:\\speech_data\\features\\train\\train_vi_full",
   "feature_mode": "N/A",
   "fusion_method": "N/A",
-  "duration": "train_raw"
+  "duration": "train_vi_full"
 }
