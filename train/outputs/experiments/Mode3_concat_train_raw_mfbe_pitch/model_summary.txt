@@ -1,0 +1,36 @@
+=================================================================
+Layer (type:depth-idx)                   Param #
+=================================================================
+SpeakerVerificationModel                 --
+├─ECAPATDNN: 1-1                         --
+│    └─InstanceNorm1d: 2-1               --
+│    └─Conv1d: 2-2                       205,312
+│    └─BatchNorm1d: 2-3                  1,024
+│    └─ModuleList: 2-4                   --
+│    │    └─BottleneckBlock: 3-1         214,784
+│    │    └─BottleneckBlock: 3-2         214,784
+│    │    └─BottleneckBlock: 3-3         214,784
+│    │    └─BottleneckBlock: 3-4         214,784
+│    └─Conv1d: 2-5                       525,312
+│    └─Linear: 2-6                       1,049,088
+│    └─BatchNorm1d: 2-7                  1,024
+├─HandcraftedEncoder: 1-2                --
+│    └─Sequential: 2-8                   --
+│    │    └─Conv1d: 3-5                  31,232
+│    │    └─BatchNorm1d: 3-6             256
+│    │    └─ReLU: 3-7                    --
+│    │    └─Conv1d: 3-8                  98,560
+│    │    └─BatchNorm1d: 3-9             512
+│    │    └─ReLU: 3-10                   --
+│    │    └─Conv1d: 3-11                 393,728
+│    │    └─BatchNorm1d: 3-12            1,024
+│    │    └─ReLU: 3-13                   --
+│    └─Linear: 2-9                       524,800
+│    └─BatchNorm1d: 2-10                 1,024
+├─ConcatenationFusion: 1-3               --
+│    └─Linear: 2-11                      524,800
+=================================================================
+Total params: 4,216,832
+Trainable params: 4,216,832
+Non-trainable params: 0
+=================================================================
