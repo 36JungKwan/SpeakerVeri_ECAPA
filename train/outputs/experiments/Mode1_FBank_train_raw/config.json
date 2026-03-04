@@ -7,6 +7,8 @@
   "num_epochs": 50,
   "optimizer": "adam",
   "weight_decay": 0.001,
+  "aam_margin": 0.3,
+  "aam_scale": 30,
   "mixed_precision": true,
   "early_stop_patience": 5,
   "seed": 42,
