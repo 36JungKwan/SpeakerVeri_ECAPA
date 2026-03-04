@@ -1,6 +1,7 @@
 """
 Training script for Dual-Stream Speaker Verification
 """
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -17,18 +18,33 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
 from torch.utils.tensorboard import SummaryWriter
-from inference import evaluate_speaker_verification
 
-from config import (
-    BATCH_SIZE, NUM_EPOCHS, LEARNING_RATE, MIN_LEARNING_RATE, WEIGHT_DECAY,
-    EARLY_STOP_PATIENCE, EARLY_STOP_DELTA, LR_SCHEDULER, COSINE_T_MAX,
-    PLATEAU_PATIENCE, PLATEAU_FACTOR, OPTIMIZER, MOMENTUM, NESTEROV,
-    DEVICE, MIXED_PRECISION, CHECKPOINT_DIR,
-    BEST_MODEL_NAME, FINAL_MODEL_NAME, MODE, FUSION_METHOD, FEATURE_MODE,
-    AAM_MARGIN, AAM_SCALE, FBANK_DIM, EMBEDDING_DIM, DIM_MAP,
-)
-from model import get_model, AAMSoftmaxLoss
-from dataset import create_train_val_loaders
+try:
+    from .inference import evaluate_speaker_verification
+    from .config import (
+        TRAIN_VAL_DIR,
+        BATCH_SIZE, NUM_EPOCHS, LEARNING_RATE, MIN_LEARNING_RATE, WEIGHT_DECAY,
+        EARLY_STOP_PATIENCE, EARLY_STOP_DELTA, LR_SCHEDULER, COSINE_T_MAX,
+        PLATEAU_PATIENCE, PLATEAU_FACTOR, OPTIMIZER, MOMENTUM, NESTEROV,
+        DEVICE, MIXED_PRECISION, CHECKPOINT_DIR,
+        BEST_MODEL_NAME, FINAL_MODEL_NAME, MODE, FUSION_METHOD, FEATURE_MODE,
+        FBANK_DIM, EMBEDDING_DIM, DIM_MAP,
+    )
+    from .model import get_model, AAMSoftmaxLoss
+    from .dataset import create_train_val_loaders
+except ImportError:
+    from inference import evaluate_speaker_verification
+    from config import (
+        TRAIN_VAL_DIR,
+        BATCH_SIZE, NUM_EPOCHS, LEARNING_RATE, MIN_LEARNING_RATE, WEIGHT_DECAY,
+        EARLY_STOP_PATIENCE, EARLY_STOP_DELTA, LR_SCHEDULER, COSINE_T_MAX,
+        PLATEAU_PATIENCE, PLATEAU_FACTOR, OPTIMIZER, MOMENTUM, NESTEROV,
+        DEVICE, MIXED_PRECISION, CHECKPOINT_DIR,
+        BEST_MODEL_NAME, FINAL_MODEL_NAME, MODE, FUSION_METHOD, FEATURE_MODE,
+        FBANK_DIM, EMBEDDING_DIM, DIM_MAP,
+    )
+    from model import get_model, AAMSoftmaxLoss
+    from dataset import create_train_val_loaders
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -51,8 +67,8 @@ def save_checkpoint(model, optimizer, epoch, best_loss, checkpoint_path):
     }
     torch.save(checkpoint, checkpoint_path)
 
-def load_checkpoint(checkpoint_path, model, optimizer=None):
-    checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+def load_checkpoint(checkpoint_path, model, optimizer=None, map_location=DEVICE):
+    checkpoint = torch.load(checkpoint_path, map_location=map_location)
     model.load_state_dict(checkpoint["model_state_dict"])
     if optimizer is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -84,7 +100,7 @@ class EarlyStopping:
 # ============================================================================
 # TRAINING & VALIDATION LOOPS
 # ============================================================================
-def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device):
+def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device, use_mixed_precision=False):
     model.train()
     total_loss, total_accuracy, num_batches = 0.0, 0.0, 0
     progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Train]", leave=False)
@@ -98,10 +114,10 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
 
         optimizer.zero_grad()
         
-        if MIXED_PRECISION:
-            with autocast('cuda'):
+        if use_mixed_precision:
+            with autocast(device_type=device.type, enabled=True):
                 _, embeddings = model(**inputs)
-            loss, logits = criterion(None, labels, embeddings=embeddings.float())
+                loss, logits = criterion(None, labels, embeddings=embeddings.float())
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -172,6 +188,10 @@ def train(args):
     
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device(args.device)
+    use_mixed_precision = bool(args.mixed_precision and device.type == "cuda")
+
+    if args.mixed_precision and device.type != "cuda":
+        print("⚠ mixed_precision=True nhưng device không phải CUDA, tự động tắt mixed precision.")
 
     if args.exp_name is None:
         args.exp_name = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -220,8 +240,12 @@ def train(args):
         opt = optim.SGD(params, lr=args.learning_rate, momentum=MOMENTUM, nesterov=NESTEROV, weight_decay=args.weight_decay)
 
     scheduler = CosineAnnealingLR(opt, T_max=COSINE_T_MAX, eta_min=MIN_LEARNING_RATE) if args.lr_scheduler == "cosine" else ReduceLROnPlateau(opt, mode="min", factor=PLATEAU_FACTOR, patience=PLATEAU_PATIENCE)
-    scaler = GradScaler() if args.mixed_precision else None
+    scaler = GradScaler(device="cuda", enabled=use_mixed_precision)
     early_stopping = EarlyStopping(patience=args.early_stop_patience)
+
+    best_eer_path = os.path.join(exp_dir, BEST_MODEL_NAME)
+    best_mindcf_path = os.path.join(exp_dir, "best_mindcf_model.pth")
+    final_model_path = os.path.join(exp_dir, FINAL_MODEL_NAME)
 
     best_val_eer = float("inf")
     best_val_mindcf = float("inf")
@@ -234,25 +258,19 @@ def train(args):
         criterion.update_margin(current_margin)
         
         # 1. Train 1 epoch
-        t_loss, t_acc = train_epoch(model, train_loader, opt, criterion, scaler, epoch, device)
-        trials_path = os.path.join(args.base_dir, "val_trials.txt")
+        t_loss, t_acc = train_epoch(model, train_loader, opt, criterion, scaler, epoch, device, use_mixed_precision=use_mixed_precision)
 
-        # 2. VALIDATION ĐỘC LẬP BẰNG EER & MinDCF (TỪ FILE CỐ ĐỊNH)
+        # 2. VALIDATION ĐỘC LẬP BẰNG EER & MinDCF
         print(f"  -> Đang tính toán EER (Open-set) cho Epoch {epoch+1}...")
-        
-        try:
-            val_metrics = evaluate_speaker_verification(
-                model=model, 
-                data_loader=val_loader, 
-                device=device,
-                trials_path=trials_path,
-                p_target=0.05
-            )
-            v_eer = val_metrics["EER (%)"]
-            v_mindcf = val_metrics[f"MinDCF (p=0.05)"]
-        except FileNotFoundError:
-            print(f"⚠ Không tìm thấy file {trials_path}! Vui lòng chạy script tạo trials trước.")
-            return None, None, None
+
+        val_metrics = evaluate_speaker_verification(
+            model=model,
+            data_loader=val_loader,
+            device=device,
+            p_target=0.05
+        )
+        v_eer = val_metrics["EER (%)"]
+        v_mindcf = val_metrics[f"MinDCF (p=0.05)"]
         
         # 3. SCHEDULER & EARLY STOPPING LÚC NÀY BUỘC PHẢI DÙNG EER
         if args.lr_scheduler == "cosine": scheduler.step()
@@ -274,18 +292,19 @@ def train(args):
         # 5. LƯU BEST MODEL THEO EER & MinDCF
         if v_eer < best_val_eer:
             best_val_eer = v_eer
-            save_checkpoint(model, opt, epoch, best_val_eer, os.path.join(exp_dir, "best_eer_model.pth"))
+            save_checkpoint(model, opt, epoch, best_val_eer, best_eer_path)
             
         if v_mindcf < best_val_mindcf:
             best_val_mindcf = v_mindcf
-            save_checkpoint(model, opt, epoch, best_val_mindcf, os.path.join(exp_dir, "best_mindcf_model.pth"))
+            save_checkpoint(model, opt, epoch, best_val_mindcf, best_mindcf_path)
 
         if early_stopping.early_stop:
             print("\n✓ Early stopping triggered do EER không giảm nữa!")
             break
 
     # Final Tasks
-    model, _, _, _ = load_checkpoint(os.path.join(exp_dir, "best_eer_model.pth"), model)
+    model, _, _, _ = load_checkpoint(best_eer_path, model, map_location=device)
+    save_checkpoint(model, opt, epoch, best_val_eer, final_model_path)
     
     # Gating Analysis
     gates, _ = analyze_gating_behavior(model, val_loader, device, exp_dir)
@@ -309,3 +328,33 @@ def train(args):
 
     writer.close()
     return model, history, exp_dir
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Train dual-stream speaker verification model")
+    parser.add_argument("--base_dir", type=str, default=TRAIN_VAL_DIR, help="Path to train/val feature directory")
+    parser.add_argument("--output_dir", type=str, default=CHECKPOINT_DIR, help="Directory to store outputs")
+    parser.add_argument("--exp_name", type=str, default=None, help="Experiment name. Auto-generated if empty")
+
+    parser.add_argument("--mode", type=int, default=MODE, choices=[1, 2, 3], help="1=FBank, 2=Handcrafted, 3=Fusion")
+    parser.add_argument("--fusion_method", type=str, default=FUSION_METHOD, choices=["concat", "gating", "cross_attention"], help="Fusion method for mode=3")
+    parser.add_argument("--feature_mode", type=str, default=FEATURE_MODE, choices=list(DIM_MAP.keys()), help="Handcrafted feature mode")
+
+    parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--num_epochs", type=int, default=NUM_EPOCHS)
+    parser.add_argument("--learning_rate", type=float, default=LEARNING_RATE)
+    parser.add_argument("--weight_decay", type=float, default=WEIGHT_DECAY)
+    parser.add_argument("--optimizer", type=str, default=OPTIMIZER, choices=["adam", "sgd"])
+    parser.add_argument("--lr_scheduler", type=str, default=LR_SCHEDULER, choices=["cosine", "plateau"])
+    parser.add_argument("--early_stop_patience", type=int, default=EARLY_STOP_PATIENCE)
+
+    parser.add_argument("--device", type=str, default=DEVICE)
+    parser.add_argument("--mixed_precision", type=lambda x: str(x).lower() in ["1", "true", "yes", "y"], default=MIXED_PRECISION)
+    parser.add_argument("--seed", type=int, default=42)
+    return parser
+
+
+if __name__ == "__main__":
+    parser = build_parser()
+    args = parser.parse_args()
+    train(args)

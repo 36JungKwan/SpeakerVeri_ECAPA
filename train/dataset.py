@@ -9,8 +9,12 @@ import os
 import glob
 import gc
 from functools import partial
-from config import RANDOM_SEED, TRAIN_RATIO, FBANK_FOLDER, HANDCRAFTED_FOLDERS
 import copy
+
+try:
+    from .config import RANDOM_SEED, TRAIN_RATIO, FBANK_FOLDER, HANDCRAFTED_FOLDERS
+except ImportError:
+    from config import RANDOM_SEED, TRAIN_RATIO, FBANK_FOLDER, HANDCRAFTED_FOLDERS
 
 def load_shard_data(folder_path):
     print(f"  -> Tối ưu RAM: Nạp thẳng data vào RAM (Float16) từ {os.path.basename(folder_path)}...")

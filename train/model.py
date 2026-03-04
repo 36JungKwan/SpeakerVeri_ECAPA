@@ -12,12 +12,20 @@ import torchaudio
 import math
 
 # Bỏ import PTM cũ, thêm các constant từ config mới
-from config import (
-    FBANK_DIM, HANDCRAFTED_DIM,
-    ECAPA_CHANNELS, ECAPA_BLOCKS, ECAPA_KERNEL_SIZE, ECAPA_DILATION,
-    EMBEDDING_DIM, AAM_MARGIN, AAM_SCALE,
-    MODE, FUSION_METHOD, DIM_MAP
-)
+try:
+    from .config import (
+        FBANK_DIM, HANDCRAFTED_DIM,
+        ECAPA_CHANNELS, ECAPA_BLOCKS, ECAPA_KERNEL_SIZE, ECAPA_DILATION,
+        EMBEDDING_DIM, AAM_MARGIN, AAM_SCALE,
+        MODE, FUSION_METHOD, DIM_MAP
+    )
+except ImportError:
+    from config import (
+        FBANK_DIM, HANDCRAFTED_DIM,
+        ECAPA_CHANNELS, ECAPA_BLOCKS, ECAPA_KERNEL_SIZE, ECAPA_DILATION,
+        EMBEDDING_DIM, AAM_MARGIN, AAM_SCALE,
+        MODE, FUSION_METHOD, DIM_MAP
+    )
 
 # ============================================================================
 # ECAPA-TDNN BACKBONE (Nhánh 1 - Nhận FBank)

@@ -3,8 +3,12 @@ import torch.nn.functional as F
 import numpy as np
 import random
 from collections import defaultdict
-from metrics import compute_eer, compute_mindcf
 from tqdm import tqdm
+
+try:
+    from .metrics import compute_eer, compute_mindcf
+except ImportError:
+    from metrics import compute_eer, compute_mindcf
 
 def evaluate_speaker_verification(model, data_loader, device, num_pairs=20000, p_target=0.05):
     model.eval()

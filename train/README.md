@@ -41,7 +41,7 @@ Important fields:
 
 - Data paths: `TRAIN_VAL_DIR`, `TEST_DIR`.
 - `MODE` – 1 (FBank only), 2 (handcrafted only), 3 (hybrid).
-- `FUSION_METHOD` – `concat`, `attention`, or `gating` for MODE 3.
+- `FUSION_METHOD` – `concat`, `cross_attention`, or `gating` for MODE 3.
 - Learning hyperparameters (batch size, epochs, lr, scheduler, early stopping, etc.).
 - `AAM_MARGIN` / `AAM_SCALE` – parameters for additive angular margin softmax loss.
 - `DEVICE` & `MIXED_PRECISION` – training device options.
@@ -71,6 +71,7 @@ Training will automatically split the data according to `TRAIN_RATIO` and save c
     model_summary.txt
     tensorboard_logs/
     best_model.pth
+    best_mindcf_model.pth
     final_model.pth            (saved at end)
     results.json
     gating_analysis/          (if using gating fusion)
@@ -108,7 +109,7 @@ Open `main.ipynb` for an interactive walkthrough: building dataloaders, running 
 
 - Always ensure `FEATURE_MODE` matches the handcrafted folder names defined in `HANDCRAFTED_FOLDERS`.
 - Random seed is fixed (`RANDOM_SEED`) for reproducibility.
-- Checkpoints are saved when validation loss improves; early stopping halts training if no improvement.
+- Checkpoints are saved when validation EER/MinDCF improve; early stopping tracks validation EER.
 
 ---
 
