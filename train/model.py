@@ -8,6 +8,7 @@ Fusion: Late Fusion (Embedding level 512-dim)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchaudio
 import math
 
 # Bỏ import PTM cũ, thêm các constant từ config mới
@@ -21,63 +22,171 @@ from config import (
 # ============================================================================
 # ECAPA-TDNN BACKBONE (Nhánh 1 - Nhận FBank)
 # ============================================================================
-class BottleneckBlock(nn.Module):
-    """Bottleneck block for ECAPA-TDNN"""
-    def __init__(self, channels=ECAPA_CHANNELS, kernel_size=ECAPA_KERNEL_SIZE, dilation=ECAPA_DILATION):
-        super().__init__()
-        self.conv1x1_1 = nn.Conv1d(channels, 128, kernel_size=1)
-        self.conv1d = nn.Conv1d(
-            128, 128, kernel_size=kernel_size, padding=(kernel_size - 1) * dilation // 2, dilation=dilation
-        )
-        self.conv1x1_2 = nn.Conv1d(128, channels, kernel_size=1)
-        self.bn = nn.BatchNorm1d(channels)
-        self.relu = nn.ReLU()
+class SEModule(nn.Module):
+    def __init__(self, channels, bottleneck=128):
+        super(SEModule, self).__init__()
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Conv1d(channels, bottleneck, kernel_size=1, padding=0),
+            nn.ReLU(),
+            # nn.BatchNorm1d(bottleneck), # I remove this layer
+            nn.Conv1d(bottleneck, channels, kernel_size=1, padding=0),
+            nn.Sigmoid(),
+            )
+
+    def forward(self, input):
+        x = self.se(input)
+        return input * x
+
+class Bottle2neck(nn.Module):
+
+    def __init__(self, inplanes, planes, kernel_size=None, dilation=None, scale = 8):
+        super(Bottle2neck, self).__init__()
+        width       = int(math.floor(planes / scale))
+        self.conv1  = nn.Conv1d(inplanes, width*scale, kernel_size=1)
+        self.bn1    = nn.BatchNorm1d(width*scale)
+        self.nums   = scale -1
+        convs       = []
+        bns         = []
+        num_pad = math.floor(kernel_size/2)*dilation
+        for i in range(self.nums):
+            convs.append(nn.Conv1d(width, width, kernel_size=kernel_size, dilation=dilation, padding=num_pad))
+            bns.append(nn.BatchNorm1d(width))
+        self.convs  = nn.ModuleList(convs)
+        self.bns    = nn.ModuleList(bns)
+        self.conv3  = nn.Conv1d(width*scale, planes, kernel_size=1)
+        self.bn3    = nn.BatchNorm1d(planes)
+        self.relu   = nn.ReLU()
+        self.width  = width
+        self.se     = SEModule(planes)
 
     def forward(self, x):
         residual = x
-        x = self.relu(self.conv1x1_1(x))
-        x = self.relu(self.conv1d(x))
-        x = self.conv1x1_2(x)
-        x = x + residual
-        return self.bn(x)
+        out = self.conv1(x)
+        out = self.relu(out)
+        out = self.bn1(out)
 
+        spx = torch.split(out, self.width, 1)
+        for i in range(self.nums):
+          if i==0:
+            sp = spx[i]
+          else:
+            sp = sp + spx[i]
+          sp = self.convs[i](sp)
+          sp = self.relu(sp)
+          sp = self.bns[i](sp)
+          if i==0:
+            out = sp
+          else:
+            out = torch.cat((out, sp), 1)
+        out = torch.cat((out, spx[self.nums]),1)
 
-class ECAPATDNN(nn.Module):
-    """ECAPA-TDNN xử lý độ dài chuỗi (T) và trả về vector Embedding 1D"""
-    def __init__(self, input_dim=FBANK_DIM, channels=ECAPA_CHANNELS, blocks=ECAPA_BLOCKS, kernel_size=ECAPA_KERNEL_SIZE, embedding_dim=EMBEDDING_DIM):
-        super().__init__()
-        self.inst_norm = nn.InstanceNorm1d(input_dim) 
+        out = self.conv3(out)
+        out = self.relu(out)
+        out = self.bn3(out)
         
-        self.conv1d_1 = nn.Conv1d(input_dim, channels, kernel_size=5, padding=2)
-        self.bn_1 = nn.BatchNorm1d(channels)
+        out = self.se(out)
+        out += residual
+        return out 
 
-        self.blocks = nn.ModuleList([
-            BottleneckBlock(channels, kernel_size, dilation=d)
-            for d in [1, 2, 3, 4][:blocks]
-        ])
+class PreEmphasis(torch.nn.Module):
 
-        self.conv1d_last = nn.Conv1d(channels, channels * 2, kernel_size=1)
-        self.fc1 = nn.Linear(channels * 4, embedding_dim)
-        self.bn_fc = nn.BatchNorm1d(embedding_dim)
+    def __init__(self, coef: float = 0.97):
+        super().__init__()
+        self.coef = coef
+        self.register_buffer(
+            'flipped_filter', torch.FloatTensor([-self.coef, 1.]).unsqueeze(0).unsqueeze(0)
+        )
+
+    def forward(self, input: torch.tensor) -> torch.tensor:
+        input = input.unsqueeze(1)
+        input = F.pad(input, (1, 0), 'reflect')
+        return F.conv1d(input, self.flipped_filter).squeeze(1)
+
+class FbankAug(nn.Module):
+
+    def __init__(self, freq_mask_width = (0, 8), time_mask_width = (0, 10)):
+        self.time_mask_width = time_mask_width
+        self.freq_mask_width = freq_mask_width
+        super().__init__()
+
+    def mask_along_axis(self, x, dim):
+        original_size = x.shape
+        batch, fea, time = x.shape
+        if dim == 1:
+            D = fea
+            width_range = self.freq_mask_width
+        else:
+            D = time
+            width_range = self.time_mask_width
+
+        mask_len = torch.randint(width_range[0], width_range[1], (batch, 1), device=x.device).unsqueeze(2)
+        mask_pos = torch.randint(0, max(1, D - mask_len.max()), (batch, 1), device=x.device).unsqueeze(2)
+        arange = torch.arange(D, device=x.device).view(1, 1, -1)
+        mask = (mask_pos <= arange) * (arange < (mask_pos + mask_len))
+        mask = mask.any(dim=1)
+
+        if dim == 1:
+            mask = mask.unsqueeze(2)
+        else:
+            mask = mask.unsqueeze(1)
+            
+        x = x.masked_fill_(mask, 0.0)
+        return x.view(*original_size)
+
+    def forward(self, x):    
+        x = self.mask_along_axis(x, dim=2)
+        x = self.mask_along_axis(x, dim=1)
+        return x
+
+class ECAPATDNN_Backbone(nn.Module):
+    def __init__(self, channels=ECAPA_CHANNELS, embedding_dim=EMBEDDING_DIM):
+        super(ECAPATDNN_Backbone, self).__init__()
+        self.specaug = FbankAug()
+        
+        # Conv đầu vào nhận 80-dim FBank
+        self.conv1 = nn.Conv1d(80, channels, kernel_size=5, stride=1, padding=2)
+        self.bn1 = nn.BatchNorm1d(channels)
+        
+        self.layer1 = Bottle2neck(channels, channels, kernel_size=3, dilation=2, scale=8)
+        self.layer2 = Bottle2neck(channels, channels, kernel_size=3, dilation=3, scale=8)
+        self.layer3 = Bottle2neck(channels, channels, kernel_size=3, dilation=4, scale=8)
+        self.layer4 = nn.Conv1d(3 * channels, 1536, kernel_size=1)
+        
+        # Attentive Statistics Pooling
+        self.attention = nn.Sequential(
+            nn.Conv1d(4608, 256, kernel_size=1),
+            nn.ReLU(),
+            nn.BatchNorm1d(256),
+            nn.Tanh(),
+            nn.Conv1d(256, 1536, kernel_size=1),
+            nn.Softmax(dim=2),
+        )
+        self.bn5 = nn.BatchNorm1d(3072)
+        self.fc6 = nn.Linear(3072, embedding_dim) 
+        self.bn6 = nn.BatchNorm1d(embedding_dim)
 
     def forward(self, x):
-        """x: (Batch, FBank_Dim, Time) -> Output: (Batch, Embedding_Dim)"""
-        x = self.inst_norm(x)
-        x = self.bn_1(self.conv1d_1(x))
+        # Tự động bật/tắt Augmentation dựa vào mode model.train() hay model.eval()
+        if self.training:
+            x = self.specaug(x)
+
+        x = F.relu(self.bn1(self.conv1(x)))
+        x1 = self.layer1(x)
+        x2 = self.layer2(x + x1)
+        x3 = self.layer3(x + x1 + x2)
         
-        for block in self.blocks:
-            x = block(x)
-
-        x = self.conv1d_last(x)
-
-        # Attentive / Statistical Pooling
-        x_f32 = x.float()
-        mean = x_f32.mean(dim=-1)
-        std = x_f32.std(dim=-1)
-        pooled = torch.cat([mean, std], dim=1).type_as(x)  # (B, channels*4)
-
-        # Xuất vector (Late Fusion level)
-        return self.bn_fc(self.fc1(pooled))
+        x = F.relu(self.layer4(torch.cat((x1, x2, x3), dim=1)))
+        t = x.size()[-1]
+        
+        global_x = torch.cat((x, x.mean(dim=2, keepdim=True).repeat(1, 1, t), 
+                             torch.sqrt(x.var(dim=2, keepdim=True).clamp(min=1e-4)).repeat(1, 1, t)), dim=1)
+        w = self.attention(global_x)
+        mu = torch.sum(x * w, dim=2)
+        sg = torch.sqrt((torch.sum((x**2) * w, dim=2) - mu**2).clamp(min=1e-4))
+        
+        emb = self.bn6(self.fc6(self.bn5(torch.cat((mu, sg), 1))))
+        return emb
 
 
 # ============================================================================
@@ -198,7 +307,7 @@ class SpeakerVerificationModel(nn.Module):
 
         # Mode 1: Chỉ chạy ECAPA-TDNN trên FBank
         if mode in [1, 3]:
-            self.main_encoder = ECAPATDNN(input_dim=FBANK_DIM, embedding_dim=EMBEDDING_DIM)
+            self.main_encoder = ECAPATDNN_Backbone(channels=ECAPA_CHANNELS, embedding_dim=EMBEDDING_DIM)
 
         # Mode 2: Chỉ chạy Conv1D trên Handcrafted
         if mode in [2, 3]:
@@ -253,12 +362,16 @@ class AAMSoftmaxLoss(nn.Module):
         super(AAMSoftmaxLoss, self).__init__()
         self.weight = nn.Parameter(torch.FloatTensor(num_speakers, embedding_dim))
         nn.init.xavier_uniform_(self.weight)
-
-        self.cos_m = math.cos(margin)
-        self.sin_m = math.sin(margin)
-        self.th = math.cos(math.pi - margin)
-        self.mm = math.sin(math.pi - margin) * margin
         self.scale = scale
+        self.update_margin(margin)
+
+    def update_margin(self, new_margin):
+        """Hàm này sẽ được gọi từ train.py mỗi epoch để tăng dần margin"""
+        self.margin = new_margin
+        self.cos_m = math.cos(new_margin)
+        self.sin_m = math.sin(new_margin)
+        self.th = math.cos(math.pi - new_margin)
+        self.mm = math.sin(math.pi - new_margin) * new_margin
 
     def forward(self, logits, labels, embeddings=None):
         cosine = F.linear(F.normalize(embeddings), F.normalize(self.weight))

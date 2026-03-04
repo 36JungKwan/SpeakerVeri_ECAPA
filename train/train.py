@@ -33,6 +33,14 @@ from dataset import create_train_val_loaders
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
+def get_margin(epoch, final_margin=0.35, increase_epochs=15):
+    """
+    Tăng dần margin từ 0.0 lên final_margin trong increase_epochs đầu tiên.
+    """
+    if epoch >= increase_epochs:
+        return final_margin
+    return (epoch / increase_epochs) * final_margin
+
 def save_checkpoint(model, optimizer, epoch, best_loss, checkpoint_path):
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     checkpoint = {
@@ -113,26 +121,6 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
 
         if num_batches % 10 == 0:
             progress_bar.set_postfix({"loss": f"{total_loss/num_batches:.4f}", "acc": f"{total_accuracy/num_batches:.4f}"})
-
-    return total_loss / max(1, num_batches), total_accuracy / max(1, num_batches)
-
-def validate(model, val_loader, criterion, device):
-    model.eval()
-    total_loss, total_accuracy, num_batches = 0.0, 0.0, 0
-    
-    with torch.no_grad():
-        progress_bar = tqdm(val_loader, desc="Validation", leave=False)
-        for batch_data in progress_bar:
-            labels = batch_data["label"].to(device)
-            inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
-
-            _, embeddings = model(**inputs)
-            loss, logits = criterion(None, labels, embeddings=embeddings.float())
-
-            total_loss += loss.item()
-            total_accuracy += compute_metrics(logits, labels)
-            num_batches += 1
-            progress_bar.set_postfix({"loss": f"{total_loss/num_batches:.4f}"})
 
     return total_loss / max(1, num_batches), total_accuracy / max(1, num_batches)
 
@@ -241,20 +229,30 @@ def train(args):
 
     print("Starting training (Open-set Validation)...\n")
     for epoch in range(args.num_epochs):
+
+        current_margin = get_margin(epoch, final_margin=0.35, increase_epochs=15)
+        criterion.update_margin(current_margin)
+        
         # 1. Train 1 epoch
         t_loss, t_acc = train_epoch(model, train_loader, opt, criterion, scaler, epoch, device)
-        
-        # 2. VALIDATION ĐỘC LẬP BẰNG EER & MinDCF (KHÔNG DÙNG LOSS NỮA)
+        trials_path = os.path.join(args.base_dir, "val_trials.txt")
+
+        # 2. VALIDATION ĐỘC LẬP BẰNG EER & MinDCF (TỪ FILE CỐ ĐỊNH)
         print(f"  -> Đang tính toán EER (Open-set) cho Epoch {epoch+1}...")
-        val_metrics = evaluate_speaker_verification(
-            model=model, 
-            data_loader=val_loader, 
-            device=device,
-            num_pairs=20000, 
-            p_target=0.05
-        )
-        v_eer = val_metrics["EER (%)"]
-        v_mindcf = val_metrics[f"MinDCF (p=0.05)"]
+        
+        try:
+            val_metrics = evaluate_speaker_verification(
+                model=model, 
+                data_loader=val_loader, 
+                device=device,
+                trials_path=trials_path,
+                p_target=0.05
+            )
+            v_eer = val_metrics["EER (%)"]
+            v_mindcf = val_metrics[f"MinDCF (p=0.05)"]
+        except FileNotFoundError:
+            print(f"⚠ Không tìm thấy file {trials_path}! Vui lòng chạy script tạo trials trước.")
+            return None, None, None
         
         # 3. SCHEDULER & EARLY STOPPING LÚC NÀY BUỘC PHẢI DÙNG EER
         if args.lr_scheduler == "cosine": scheduler.step()
