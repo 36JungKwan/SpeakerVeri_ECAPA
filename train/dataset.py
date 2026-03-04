@@ -24,6 +24,7 @@ def load_shard_data(folder_path):
         
     shards_data = []
     all_speaker_ids = []
+    all_utt_ids = []
     sample_map = [] 
     
     # 1. TẮT BỘ GOM RÁC ĐỂ TRÁNH LỖI TREO MÁY 25 PHÚT
@@ -44,6 +45,13 @@ def load_shard_data(folder_path):
             
         spks = data["speaker_ids"]
         all_speaker_ids.extend(spks)
+
+        filenames = data.get("filenames")
+        if filenames is not None and len(filenames) == len(spks):
+            all_utt_ids.extend([str(name) for name in filenames])
+        else:
+            shard_name = os.path.basename(f)
+            all_utt_ids.extend([f"{shard_name}::{i}" for i in range(len(spks))])
         
         for i in range(len(spks)):
             sample_map.append((shard_idx, i))
@@ -55,7 +63,7 @@ def load_shard_data(folder_path):
     # 5. BẬT LẠI BỘ GOM RÁC SAU KHI LOAD XONG
     gc.enable() 
     
-    return shards_data, all_speaker_ids, sample_map
+    return shards_data, all_speaker_ids, all_utt_ids, sample_map
 
 class DualStreamDataset(Dataset):
     def __init__(self, base_dir, mode=3, feature_mode="mfbe_pitch", speaker_to_idx=None):
@@ -68,12 +76,16 @@ class DualStreamDataset(Dataset):
         self.speaker_ids = []
         
         if mode in [1,3]:
-            self.fbank_shards, self.speaker_ids, self.fbank_map = load_shard_data(fbank_dir)
+            self.fbank_shards, self.speaker_ids, self.utt_ids, self.fbank_map = load_shard_data(fbank_dir)
             
         if mode in [2,3]:
-            self.hc_shards, hc_speaker_ids, self.hc_map = load_shard_data(hc_dir)
+            self.hc_shards, hc_speaker_ids, hc_utt_ids, self.hc_map = load_shard_data(hc_dir)
             if mode == 2:
                 self.speaker_ids = hc_speaker_ids
+                self.utt_ids = hc_utt_ids
+
+        if not hasattr(self, "utt_ids"):
+            self.utt_ids = [str(i) for i in range(len(self.speaker_ids))]
                 
         self.speaker_to_idx = speaker_to_idx or {}
         if not self.speaker_to_idx:
@@ -87,8 +99,9 @@ class DualStreamDataset(Dataset):
 
     def __getitem__(self, idx):
         spk_id = self.speaker_ids[idx]
+        utt_id = self.utt_ids[idx]
         label = self.speaker_to_idx[spk_id]
-        data = {"label": label}
+        data = {"label": label, "utt_id": utt_id}
         
         if self.mode in [1,3]:
             shard_idx, local_idx = self.fbank_map[idx]
@@ -107,7 +120,7 @@ class DualStreamDataset(Dataset):
 
 def collate_fn_dual(batch, mode, is_train=True, max_frames=300):
     labels = torch.tensor([item["label"] for item in batch], dtype=torch.long)
-    output = {"label": labels}
+    output = {"label": labels, "utt_id": [item["utt_id"] for item in batch]}
 
     def process_features(features):
         safe_features = [f.unsqueeze(0) if f.dim() == 1 else f for f in features]

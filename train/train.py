@@ -107,7 +107,7 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
 
     for batch_data in progress_bar:
         labels = batch_data["label"].to(device)
-        inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
+        inputs = {k: v.to(device) for k, v in batch_data.items() if isinstance(v, torch.Tensor) and k != "label"}
 
         if "fbank" in inputs and torch.isnan(inputs["fbank"]).any(): continue
         if "handcrafted" in inputs and torch.isnan(inputs["handcrafted"]).any(): continue
@@ -252,6 +252,13 @@ def train(args):
     history = {"train_loss": [], "train_acc": [], "val_eer": [], "val_mindcf": []}
 
     print("Starting training (Open-set Validation)...\n")
+    val_trials_path = os.path.join(args.base_dir, "val_trials.txt")
+    if os.path.exists(val_trials_path):
+        print(f"✓ Sử dụng cặp validation có sẵn: {val_trials_path}")
+    else:
+        val_trials_path = None
+        print("⚠ Không tìm thấy val_trials.txt, fallback sang random balanced pairs.")
+
     for epoch in range(args.num_epochs):
 
         current_margin = get_margin(epoch, final_margin=0.35, increase_epochs=15)
@@ -267,7 +274,8 @@ def train(args):
             model=model,
             data_loader=val_loader,
             device=device,
-            p_target=0.05
+            p_target=0.05,
+            trials_path=val_trials_path,
         )
         v_eer = val_metrics["EER (%)"]
         v_mindcf = val_metrics[f"MinDCF (p=0.05)"]
