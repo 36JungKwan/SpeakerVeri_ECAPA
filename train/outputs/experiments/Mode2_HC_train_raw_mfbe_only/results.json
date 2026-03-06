@@ -1,0 +1,30 @@
+{
+    "status": "completed",
+    "epochs_trained": 18,
+    "config": {
+        "test_dir": "D:/test",
+        "output_dir": "./outputs",
+        "batch_size": 64,
+        "learning_rate": 0.0001,
+        "lr_scheduler": "plateau",
+        "num_epochs": 50,
+        "optimizer": "adam",
+        "weight_decay": 0.001,
+        "aam_margin": 0.3,
+        "aam_scale": 30,
+        "mixed_precision": true,
+        "early_stop_patience": 5,
+        "seed": 42,
+        "device": "cuda",
+        "mode": 2,
+        "exp_name": "Mode2_HC_train_raw_mfbe_only",
+        "base_dir": "E:\\speech_data\\features\\train\\train_raw",
+        "feature_mode": "mfbe_only",
+        "fusion_method": "N/A",
+        "duration": "train_raw"
+    },
+    "best_metrics": {
+        "best_val_eer": 11.495904288450914,
+        "best_val_mindcf": 0.5378486055776892
+    }
+}
