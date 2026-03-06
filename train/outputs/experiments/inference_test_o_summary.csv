@@ -1,0 +1,9 @@
+﻿experiment,mode,feature_mode,fusion_method,checkpoint,status,eer_percent,mindcf,pairs_used,pairs_missing
+Mode1_FBank_train_raw,1,N/A,N/A,best_model.pth,ok,4.1253,0.540997,9895.0,0.0
+Mode1_FBank_train_vi_full,1,N/A,N/A,best_model.pth,ok,4.416,0.604177,9895.0,0.0
+Mode2_HC_train_raw_mfbe_only,2,mfbe_only,N/A,best_model.pth,ok,43.8763,1.0,9895.0,0.0
+Mode2_HC_train_raw_mfbe_pitch,2,mfbe_pitch,N/A,best_model.pth,ok,42.1857,1.0,9895.0,0.0
+Mode2_HC_train_raw_pitch_only,2,pitch_only,N/A,,skip_missing_handcrafted_file,,,,
+Mode2_HC_train_vi_full_mfbe_only,2,mfbe_only,N/A,best_model.pth,ok,43.829,0.999591,9895.0,0.0
+Mode2_HC_train_vi_full_mfbe_pitch,2,mfbe_pitch,N/A,best_model.pth,ok,43.9913,1.0,9895.0,0.0
+Mode2_HC_train_vi_full_pitch_only,2,pitch_only,N/A,,skip_missing_handcrafted_file,,,,
