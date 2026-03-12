@@ -10,39 +10,31 @@ import glob
 import gc
 from functools import partial
 import copy
+from collections import OrderedDict
 
 try:
     from .config import RANDOM_SEED, TRAIN_RATIO, FBANK_FOLDER, HANDCRAFTED_FOLDERS
 except ImportError:
     from config import RANDOM_SEED, TRAIN_RATIO, FBANK_FOLDER, HANDCRAFTED_FOLDERS
 
-def load_shard_data(folder_path):
-    print(f"  -> Tối ưu RAM: Nạp thẳng data vào RAM (Float16) từ {os.path.basename(folder_path)}...")
+def scan_shard_metadata(folder_path):
+    print(f"  -> Quét metadata shard từ {os.path.basename(folder_path)} (không nạp toàn bộ RAM)...")
     shard_files = sorted(glob.glob(os.path.join(folder_path, "**", "*.pt"), recursive=True))
     if not shard_files:
         raise ValueError(f"Không tìm thấy file .pt nào trong {folder_path}")
-        
-    shards_data = []
+
+    shard_feat_keys = []
     all_speaker_ids = []
     all_utt_ids = []
-    sample_map = [] 
-    
-    # 1. TẮT BỘ GOM RÁC ĐỂ TRÁNH LỖI TREO MÁY 25 PHÚT
-    gc.disable() 
+    sample_map = []
     
     for shard_idx, f in enumerate(shard_files):
-        # 2. KHÔNG DÙNG mmap, nạp thẳng vào RAM
         data = torch.load(f, map_location='cpu', weights_only=False)
-        
+
         feat_key = [k for k in data.keys() if k not in ["speaker_ids", "filenames", "model_name"]][0]
+        shard_feat_keys.append(feat_key)
         features = data[feat_key]
-        
-        # 3. ÉP KIỂU SANG FLOAT16 NGAY LẬP TỨC ĐỂ CỨU 32GB RAM
-        if isinstance(features, torch.Tensor):
-            shards_data.append(features.half())
-        else:
-            shards_data.append([t.half() for t in features])
-            
+
         spks = data["speaker_ids"]
         all_speaker_ids.extend(spks)
 
@@ -55,31 +47,110 @@ def load_shard_data(folder_path):
         
         for i in range(len(spks)):
             sample_map.append((shard_idx, i))
-            
-        # 4. Xóa biến tạm thủ công để RAM không bị phình to (Peak Memory) trong lúc load
+
         del data
         del features
-        
-    # 5. BẬT LẠI BỘ GOM RÁC SAU KHI LOAD XONG
-    gc.enable() 
-    
+
+    gc.collect()
+    return shard_files, shard_feat_keys, all_speaker_ids, all_utt_ids, sample_map
+
+
+def preload_shard_data(folder_path):
+    print(f"  -> Tối ưu tốc độ: Nạp shard vào RAM (Float16) từ {os.path.basename(folder_path)}...")
+    shard_files = sorted(glob.glob(os.path.join(folder_path, "**", "*.pt"), recursive=True))
+    if not shard_files:
+        raise ValueError(f"Không tìm thấy file .pt nào trong {folder_path}")
+
+    shards_data = []
+    all_speaker_ids = []
+    all_utt_ids = []
+    sample_map = []
+
+    for shard_idx, shard_path in enumerate(shard_files):
+        data = torch.load(shard_path, map_location='cpu', weights_only=False)
+        feat_key = [k for k in data.keys() if k not in ["speaker_ids", "filenames", "model_name"]][0]
+        features = data[feat_key]
+
+        if isinstance(features, torch.Tensor):
+            shards_data.append(features.half())
+        else:
+            shards_data.append([t.half() for t in features])
+
+        spks = data["speaker_ids"]
+        all_speaker_ids.extend(spks)
+
+        filenames = data.get("filenames")
+        if filenames is not None and len(filenames) == len(spks):
+            all_utt_ids.extend([str(name) for name in filenames])
+        else:
+            shard_name = os.path.basename(shard_path)
+            all_utt_ids.extend([f"{shard_name}::{i}" for i in range(len(spks))])
+
+        for i in range(len(spks)):
+            sample_map.append((shard_idx, i))
+
+        del data
+        del features
+
+    gc.collect()
     return shards_data, all_speaker_ids, all_utt_ids, sample_map
 
 class DualStreamDataset(Dataset):
-    def __init__(self, base_dir, mode=3, feature_mode="mfbe_pitch", speaker_to_idx=None):
+    def __init__(
+        self,
+        base_dir,
+        mode=3,
+        feature_mode="mfbe_pitch",
+        speaker_to_idx=None,
+        cache_strategy="preload",
+        max_cached_shards=2,
+    ):
         self.mode = mode
+        self.cache_strategy = cache_strategy
+        self.max_cached_shards = max(1, int(max_cached_shards))
         self.hc_folder_name = HANDCRAFTED_FOLDERS.get(feature_mode, "mfbe_pitch_shards")
         
         fbank_dir = os.path.join(base_dir, FBANK_FOLDER)
         hc_dir = os.path.join(base_dir, self.hc_folder_name)
         
         self.speaker_ids = []
-        
+
+        self.fbank_cache = OrderedDict()
+        self.hc_cache = OrderedDict()
+
         if mode in [1,3]:
-            self.fbank_shards, self.speaker_ids, self.utt_ids, self.fbank_map = load_shard_data(fbank_dir)
-            
+            if self.cache_strategy == "preload":
+                (
+                    self.fbank_shards,
+                    self.speaker_ids,
+                    self.utt_ids,
+                    self.fbank_map,
+                ) = preload_shard_data(fbank_dir)
+            else:
+                (
+                    self.fbank_shard_files,
+                    self.fbank_feat_keys,
+                    self.speaker_ids,
+                    self.utt_ids,
+                    self.fbank_map,
+                ) = scan_shard_metadata(fbank_dir)
+
         if mode in [2,3]:
-            self.hc_shards, hc_speaker_ids, hc_utt_ids, self.hc_map = load_shard_data(hc_dir)
+            if self.cache_strategy == "preload":
+                (
+                    self.hc_shards,
+                    hc_speaker_ids,
+                    hc_utt_ids,
+                    self.hc_map,
+                ) = preload_shard_data(hc_dir)
+            else:
+                (
+                    self.hc_shard_files,
+                    self.hc_feat_keys,
+                    hc_speaker_ids,
+                    hc_utt_ids,
+                    self.hc_map,
+                ) = scan_shard_metadata(hc_dir)
             if mode == 2:
                 self.speaker_ids = hc_speaker_ids
                 self.utt_ids = hc_utt_ids
@@ -91,8 +162,35 @@ class DualStreamDataset(Dataset):
         if not self.speaker_to_idx:
             unique_speakers = sorted(set(self.speaker_ids))
             self.speaker_to_idx = {spk: idx for idx, spk in enumerate(unique_speakers)}
-            
+
         self.num_speakers = len(self.speaker_to_idx)
+
+    def _load_cached_shard(self, shard_files, feat_keys, cache_dict, shard_idx):
+        if shard_idx in cache_dict:
+            cache_dict.move_to_end(shard_idx)
+            return cache_dict[shard_idx]
+
+        shard_path = shard_files[shard_idx]
+        data = torch.load(shard_path, map_location='cpu', weights_only=False)
+        feat_key = feat_keys[shard_idx]
+        features = data[feat_key]
+
+        if isinstance(features, torch.Tensor):
+            features = features.half()
+        else:
+            features = [t.half() for t in features]
+
+        cache_dict[shard_idx] = features
+        cache_dict.move_to_end(shard_idx)
+
+        while len(cache_dict) > self.max_cached_shards:
+            cache_dict.popitem(last=False)
+
+        return features
+
+    def _reset_runtime_cache(self):
+        self.fbank_cache = OrderedDict()
+        self.hc_cache = OrderedDict()
 
     def __len__(self):
         return len(self.speaker_ids)
@@ -105,17 +203,24 @@ class DualStreamDataset(Dataset):
         
         if self.mode in [1,3]:
             shard_idx, local_idx = self.fbank_map[idx]
-            # Lấy data ra và bung ngược lại thành Float32 cho GPU
-            fbank_feat = self.fbank_shards[shard_idx][local_idx].float()
+            if self.cache_strategy == "preload":
+                fbank_features = self.fbank_shards[shard_idx]
+            else:
+                fbank_features = self._load_cached_shard(self.fbank_shard_files, self.fbank_feat_keys, self.fbank_cache, shard_idx)
+            fbank_feat = fbank_features[local_idx].float()
             if fbank_feat.dim() == 1: fbank_feat = fbank_feat.unsqueeze(0)
             data["fbank"] = fbank_feat
-            
+
         if self.mode in [2,3]:
             shard_idx, local_idx = self.hc_map[idx]
-            hc_feat = self.hc_shards[shard_idx][local_idx].float()
+            if self.cache_strategy == "preload":
+                hc_features = self.hc_shards[shard_idx]
+            else:
+                hc_features = self._load_cached_shard(self.hc_shard_files, self.hc_feat_keys, self.hc_cache, shard_idx)
+            hc_feat = hc_features[local_idx].float()
             if hc_feat.dim() == 1: hc_feat = hc_feat.unsqueeze(0)
             data["handcrafted"] = hc_feat
-            
+
         return data
 
 def collate_fn_dual(batch, mode, is_train=True, max_frames=300):
@@ -150,9 +255,23 @@ def collate_fn_dual(batch, mode, is_train=True, max_frames=300):
 
     return output
 
-def create_train_val_loaders(base_dir, mode=3, feature_mode="mfbe_pitch", batch_size=64, num_workers=0):
+def create_train_val_loaders(
+    base_dir,
+    mode=3,
+    feature_mode="mfbe_pitch",
+    batch_size=64,
+    num_workers=0,
+    cache_strategy="preload",
+    max_cached_shards=2,
+):
     print(f"🔍 Đang quét dữ liệu Train/Val tại: {base_dir}...")
-    full_dataset = DualStreamDataset(base_dir, mode, feature_mode)
+    full_dataset = DualStreamDataset(
+        base_dir,
+        mode,
+        feature_mode,
+        cache_strategy=cache_strategy,
+        max_cached_shards=max_cached_shards,
+    )
     
     # 1. LẤY DANH SÁCH SPEAKER VÀ TRỘN NGẪU NHIÊN
     unique_speakers = sorted(set(full_dataset.speaker_ids))
@@ -177,9 +296,11 @@ def create_train_val_loaders(base_dir, mode=3, feature_mode="mfbe_pitch", batch_
     # 5. TẠO 2 DATASET ĐỘC LẬP ĐỂ KHÔNG ĐỤNG CHẠM LABEL
     train_dataset = copy.copy(full_dataset)
     train_dataset.speaker_to_idx = train_speaker_to_idx
-    
+    train_dataset._reset_runtime_cache()
+
     val_dataset = copy.copy(full_dataset)
     val_dataset.speaker_to_idx = val_speaker_to_idx
+    val_dataset._reset_runtime_cache()
 
     # 6. TẠO DATALOADER
     train_loader = DataLoader(

@@ -35,7 +35,7 @@ def _candidate_keys(path_text):
     return out
 
 
-def _load_trials_file(trials_path):
+def _load_trials_file(trials_path, max_trials=None):
     trials = []
     with open(trials_path, "r", encoding="utf-8") as file:
         for line in file:
@@ -49,34 +49,80 @@ def _load_trials_file(trials_path):
             path1 = parts[1]
             path2 = parts[2]
             trials.append((label, path1, path2))
+            if max_trials is not None and len(trials) >= max_trials:
+                break
     return trials
 
 
-def evaluate_speaker_verification(model, data_loader, device, num_pairs=20000, p_target=0.05, trials_path=None):
+def evaluate_speaker_verification(
+    model,
+    data_loader,
+    device,
+    num_pairs=20000,
+    p_target=0.05,
+    trials_path=None,
+    max_trials=None,
+):
     model.eval()
     all_embeddings = []
     all_labels = []
     all_utt_ids = []
 
+    selected_trials = None
+    required_trial_keys = None
+    if trials_path is not None and os.path.exists(trials_path):
+        selected_trials = _load_trials_file(trials_path, max_trials=max_trials)
+        required_trial_keys = set()
+        for label, path1, path2 in selected_trials:
+            for key in _candidate_keys(path1):
+                required_trial_keys.add(key)
+            for key in _candidate_keys(path2):
+                required_trial_keys.add(key)
+
     print("\n[Evaluation] Extracting embeddings...")
     with torch.no_grad():
         for batch_data in tqdm(data_loader, desc="Extracting", leave=False):
-            labels = batch_data["label"]
             utt_ids = batch_data.get("utt_id")
-            inputs = {k: v.to(device) for k, v in batch_data.items() if isinstance(v, torch.Tensor) and k != "label"}
+            labels = batch_data["label"]
+
+            selected_indices = None
+            if required_trial_keys is not None and utt_ids is not None:
+                selected_indices = []
+                for idx, utt in enumerate(utt_ids):
+                    utt_key_hit = False
+                    for key in _candidate_keys(utt):
+                        if key in required_trial_keys:
+                            utt_key_hit = True
+                            break
+                    if utt_key_hit:
+                        selected_indices.append(idx)
+
+                if len(selected_indices) == 0:
+                    continue
+
+            inputs = {k: v for k, v in batch_data.items() if isinstance(v, torch.Tensor) and k != "label"}
+            if selected_indices is not None:
+                idx_tensor = torch.as_tensor(selected_indices, dtype=torch.long)
+                labels = labels.index_select(0, idx_tensor)
+                inputs = {k: v.index_select(0, idx_tensor) for k, v in inputs.items()}
+                utt_ids = [utt_ids[i] for i in selected_indices]
+
+            inputs = {k: v.to(device) for k, v in inputs.items()}
             
             _, embeddings = model(**inputs) 
-            all_embeddings.append(embeddings.cpu())
+            # Chuẩn hóa theo batch và giữ fp16 trên CPU để giảm peak RAM.
+            emb_cpu = F.normalize(embeddings, p=2, dim=1).detach().cpu().half()
+            all_embeddings.append(emb_cpu)
             all_labels.append(labels.cpu())
             if utt_ids is None:
                 all_utt_ids.extend([str(len(all_utt_ids) + i) for i in range(len(labels))])
             else:
                 all_utt_ids.extend([str(item) for item in utt_ids])
 
-    all_embeddings = F.normalize(torch.cat(all_embeddings, dim=0), p=2, dim=1)
+    all_embeddings = torch.cat(all_embeddings, dim=0)
     all_labels = torch.cat(all_labels, dim=0).numpy()
     
-    if trials_path is not None and os.path.exists(trials_path):
+    if selected_trials is not None:
         print(f"[Evaluation] Scoring fixed trials from: {trials_path}")
 
         key_to_indices = defaultdict(list)
@@ -86,8 +132,7 @@ def evaluate_speaker_verification(model, data_loader, device, num_pairs=20000, p
 
         idx1_list, idx2_list, y_true = [], [], []
         missing_trials = 0
-        trials = _load_trials_file(trials_path)
-        for label, path1, path2 in trials:
+        for label, path1, path2 in selected_trials:
             indices1 = None
             indices2 = None
             for key in _candidate_keys(path1):
@@ -113,7 +158,7 @@ def evaluate_speaker_verification(model, data_loader, device, num_pairs=20000, p
         emb1 = all_embeddings[idx1_list]
         emb2 = all_embeddings[idx2_list]
 
-        scores = torch.sum(emb1 * emb2, dim=1).numpy()
+        scores = torch.sum((emb1 * emb2).float(), dim=1).numpy()
         y_true = np.array(y_true)
 
         eer, eer_thresh = compute_eer(y_true, scores)
@@ -184,7 +229,7 @@ def evaluate_speaker_verification(model, data_loader, device, num_pairs=20000, p
     emb1 = all_embeddings[idx1_list]
     emb2 = all_embeddings[idx2_list]
     
-    scores = torch.sum(emb1 * emb2, dim=1).numpy()
+    scores = torch.sum((emb1 * emb2).float(), dim=1).numpy()
     y_true = np.array(y_true)
     
     eer, eer_thresh = compute_eer(y_true, scores)

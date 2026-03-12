@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
 from torch.utils.tensorboard import SummaryWriter
+import gc
 
 try:
     from .inference import evaluate_speaker_verification
@@ -106,13 +107,17 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
     progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Train]", leave=False)
 
     for batch_data in progress_bar:
-        labels = batch_data["label"].to(device)
-        inputs = {k: v.to(device) for k, v in batch_data.items() if isinstance(v, torch.Tensor) and k != "label"}
+        labels = batch_data["label"].to(device, non_blocking=True)
+        inputs = {
+            k: v.to(device, non_blocking=True)
+            for k, v in batch_data.items()
+            if isinstance(v, torch.Tensor) and k != "label"
+        }
 
         if "fbank" in inputs and torch.isnan(inputs["fbank"]).any(): continue
         if "handcrafted" in inputs and torch.isnan(inputs["handcrafted"]).any(): continue
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         
         if use_mixed_precision:
             with autocast(device_type=device.type, enabled=True):
@@ -153,8 +158,12 @@ def analyze_gating_behavior(model, loader, device, exp_dir):
     print("\nAnalyzing gating weights...")
     with torch.no_grad():
         for batch_data in tqdm(loader, leave=False):
-            labels = batch_data["label"].to(device)
-            inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
+            labels = batch_data["label"].to(device, non_blocking=True)
+            inputs = {
+                k: v.to(device, non_blocking=True)
+                for k, v in batch_data.items()
+                if isinstance(v, torch.Tensor) and k != "label"
+            }
             
             _, _, gate_weights = model(return_gates=True, **inputs)
             
@@ -206,8 +215,15 @@ def train(args):
         json.dump(config_snapshot, f, indent=2)
 
     # Dataloaders
+    num_workers = int(getattr(args, "num_workers", 0))
     train_loader, val_loader, speaker_to_idx, num_speakers = create_train_val_loaders(
-        args.base_dir, args.mode, args.feature_mode, args.batch_size, num_workers=0
+        args.base_dir,
+        args.mode,
+        args.feature_mode,
+        args.batch_size,
+        num_workers=num_workers,
+        cache_strategy="preload",
+        max_cached_shards=2,
     )
 
     # Model
@@ -276,6 +292,7 @@ def train(args):
             device=device,
             p_target=0.05,
             trials_path=val_trials_path,
+            max_trials=int(getattr(args, "val_num_pairs", 10000)),
         )
         v_eer = val_metrics["EER (%)"]
         v_mindcf = val_metrics[f"MinDCF (p=0.05)"]
@@ -309,6 +326,12 @@ def train(args):
         if early_stopping.early_stop:
             print("\n✓ Early stopping triggered do EER không giảm nữa!")
             break
+
+        # Dọn bộ nhớ để giảm tình trạng chậm dần giữa các epoch.
+        del val_metrics
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     # Final Tasks
     model, _, _, _ = load_checkpoint(best_eer_path, model, map_location=device)
@@ -355,6 +378,8 @@ def build_parser():
     parser.add_argument("--optimizer", type=str, default=OPTIMIZER, choices=["adam", "sgd"])
     parser.add_argument("--lr_scheduler", type=str, default=LR_SCHEDULER, choices=["cosine", "plateau"])
     parser.add_argument("--early_stop_patience", type=int, default=EARLY_STOP_PATIENCE)
+    parser.add_argument("--num_workers", type=int, default=0, help="Number of DataLoader workers")
+    parser.add_argument("--val_num_pairs", type=int, default=10000, help="Max number of fixed validation trials per epoch")
 
     parser.add_argument("--device", type=str, default=DEVICE)
     parser.add_argument("--mixed_precision", type=lambda x: str(x).lower() in ["1", "true", "yes", "y"], default=MIXED_PRECISION)
