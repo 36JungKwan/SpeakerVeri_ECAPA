@@ -1,0 +1,6 @@
+streamlit
+pandas
+librosa
+soundfile
+torch
+torchaudio
